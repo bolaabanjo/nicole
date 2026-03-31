@@ -2,6 +2,8 @@ import { ChatMessage, ChatOptions, EmbeddingResponse } from "./types";
 
 const CENCORI_BASE = process.env.CENCORI_API_URL;
 const CENCORI_KEY = process.env.CENCORI_API_KEY;
+const CHAT_MODEL = process.env.CHAT_MODEL || "gemini-2.5-flash";
+const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-004";
 
 /**
  * Send a chat request through Cencori.
@@ -17,7 +19,7 @@ export async function chat(
       "Content-Type": "application/json",
       Authorization: `Bearer ${CENCORI_KEY}`,
     },
-    body: JSON.stringify({ messages, ...options }),
+    body: JSON.stringify({ model: CHAT_MODEL, messages, ...options }),
   });
 
   if (!res.ok) {
@@ -42,7 +44,7 @@ export async function embed(text: string): Promise<number[]> {
       "Content-Type": "application/json",
       Authorization: `Bearer ${CENCORI_KEY}`,
     },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ model: EMBED_MODEL, text }),
   });
 
   if (!res.ok) {
