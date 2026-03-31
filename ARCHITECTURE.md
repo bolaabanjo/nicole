@@ -1,6 +1,10 @@
-# Second Mind — Architecture
+# Nicole — Architecture
 
-A personal AI-powered study and research system. Built for one user, runs on a local laptop, costs nothing.
+Nicole is my Personal Intelligence Network. She starts as a study and research partner, but the long-term vision is a system that grows with me — learning how I think, how I communicate, and eventually how I move through the world.
+
+Phase 1 is study and research. Phase ∞ is a self-hosted personal AI with its own training loop, voice, vision, and integrations across every system I touch. This will take decades, and that's the point.
+
+**Current phase:** Study & research partner on local hardware, AI routed through Cencori.
 
 ---
 
