@@ -11,7 +11,6 @@ export default function Dashboard() {
         </p>
       </div>
 
-      {/* Quick actions */}
       <div className="grid grid-cols-2 gap-3">
         <a
           href="/study"
