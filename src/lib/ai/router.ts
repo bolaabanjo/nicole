@@ -29,7 +29,15 @@ export async function chat(
     maxTokens: options.maxTokens,
   });
 
-  return response.content;
+  // Extract text from response — SDK may return different shapes
+  const r = response as any;
+  if (typeof r === "string") return r;
+  if (typeof r?.content === "string") return r.content;
+  if (r?.choices?.[0]?.message?.content) return r.choices[0].message.content;
+  if (r?.message?.content) return r.message.content;
+
+  console.log("Cencori chat response shape:", JSON.stringify(r, null, 2));
+  return String(r);
 }
 
 /**

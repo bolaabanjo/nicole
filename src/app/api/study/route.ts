@@ -64,18 +64,8 @@ ${context}
       ...messages,
     ];
 
-    // Stream the response
-    const response = await chat(fullMessages, { stream: true });
-
-    if (response instanceof ReadableStream) {
-      return new Response(response, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    }
+    // Get response (non-streaming for now)
+    const response = await chat(fullMessages);
 
     return NextResponse.json({ content: response });
   } catch (error) {
