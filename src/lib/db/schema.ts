@@ -35,7 +35,7 @@ export const chunks = pgTable(
     embedding: vector("embedding", { dimensions: 768 }),
     createdAt: timestamp("created_at").defaultNow(),
   },
-  (table) => [index("chunks_embedding_idx").using("ivfflat", table.embedding)]
+  (table) => [index("chunks_embedding_idx").using("ivfflat", table.embedding.op("vector_cosine_ops"))]
 );
 
 // Concepts: extracted knowledge nodes
