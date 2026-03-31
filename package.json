@@ -17,6 +17,7 @@
     "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "cencori": "^1.1.0",
     "drizzle-orm": "^0.45.2",
     "next": "^16.2.1",
     "pdf-parse": "^2.4.5",

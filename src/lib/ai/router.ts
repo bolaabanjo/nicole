@@ -1,7 +1,6 @@
+import { cencori } from "./cencori";
 import { ChatMessage, ChatOptions, EmbeddingResponse } from "./types";
 
-const CENCORI_BASE = process.env.CENCORI_API_URL;
-const CENCORI_KEY = process.env.CENCORI_API_KEY;
 const CHAT_MODEL = process.env.CHAT_MODEL || "gemini-2.5-flash";
 const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-004";
 
@@ -13,46 +12,36 @@ export async function chat(
   messages: ChatMessage[],
   options: ChatOptions = {}
 ): Promise<string | ReadableStream> {
-  const res = await fetch(`${CENCORI_BASE}/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${CENCORI_KEY}`,
-    },
-    body: JSON.stringify({ model: CHAT_MODEL, messages, ...options }),
+  if (options.stream) {
+    const stream = await cencori.ai.chatStream({
+      model: CHAT_MODEL,
+      messages,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+    });
+    return stream as unknown as ReadableStream;
+  }
+
+  const response = await cencori.ai.chat({
+    model: CHAT_MODEL,
+    messages,
+    temperature: options.temperature,
+    maxTokens: options.maxTokens,
   });
 
-  if (!res.ok) {
-    throw new Error(`Cencori error: ${res.status} ${res.statusText}`);
-  }
-
-  if (options.stream) {
-    return res.body as ReadableStream;
-  }
-
-  const data = await res.json();
-  return data.content;
+  return response.content;
 }
 
 /**
  * Generate an embedding for a piece of text through Cencori.
  */
 export async function embed(text: string): Promise<number[]> {
-  const res = await fetch(`${CENCORI_BASE}/embed`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${CENCORI_KEY}`,
-    },
-    body: JSON.stringify({ model: EMBED_MODEL, text }),
+  const response = await cencori.ai.embeddings({
+    model: EMBED_MODEL,
+    input: text,
   });
 
-  if (!res.ok) {
-    throw new Error(`Cencori embed error: ${res.status} ${res.statusText}`);
-  }
-
-  const data: EmbeddingResponse = await res.json();
-  return data.embedding;
+  return response.embeddings[0];
 }
 
 /**
@@ -60,11 +49,11 @@ export async function embed(text: string): Promise<number[]> {
  */
 export async function isOnline(): Promise<boolean> {
   try {
-    const res = await fetch(`${CENCORI_BASE}/health`, {
-      method: "GET",
+    const res = await fetch("https://cencori.com/api/ai/chat", {
+      method: "HEAD",
       signal: AbortSignal.timeout(3000),
     });
-    return res.ok;
+    return true;
   } catch {
     return false;
   }
