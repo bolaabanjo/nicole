@@ -47,6 +47,7 @@ export async function extractAndStoreMemories(
             content: mem.content,
             category: mem.category,
             importance: mem.importance || 5,
+            source: "conversation",
           });
         }
       }
@@ -65,6 +66,8 @@ export async function loadMemories(limit = 30): Promise<string> {
       .select({
         content: memories.content,
         category: memories.category,
+        source: memories.source,
+        topic: memories.topic,
       })
       .from(memories)
       .orderBy(desc(memories.importance), desc(memories.createdAt))
@@ -72,7 +75,13 @@ export async function loadMemories(limit = 30): Promise<string> {
 
     if (mems.length === 0) return "";
 
-    return mems.map((m) => `[${m.category}] ${m.content}`).join("\n");
+    return mems
+      .map((m) => {
+        const topicTag = m.topic ? ` (re: ${m.topic})` : "";
+        const sourceTag = m.source === "research" ? " [researched]" : "";
+        return `[${m.category}]${sourceTag}${topicTag} ${m.content}`;
+      })
+      .join("\n");
   } catch {
     return "";
   }

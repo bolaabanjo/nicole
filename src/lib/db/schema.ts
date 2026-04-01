@@ -123,12 +123,14 @@ export const sessions = pgTable("sessions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// Memories: things Nicole remembers about Roy
+// Memories: things Nicole remembers
 export const memories = pgTable("memories", {
   id: uuid("id").primaryKey().defaultRandom(),
-  content: text("content").notNull(), // the memory itself
-  category: text("category").notNull(), // 'personal', 'preference', 'goal', 'fact', 'context'
-  importance: integer("importance").default(5), // 1-10, higher = more important
+  content: text("content").notNull(),
+  category: text("category").notNull(), // 'personal', 'preference', 'goal', 'fact', 'context', 'career', 'project', 'achievement', 'education', 'public'
+  importance: integer("importance").default(5), // 1-10
+  source: text("source").default("conversation"), // 'conversation', 'research', 'ingestion'
+  topic: text("topic"), // what/who this memory is about — e.g. "Bola Banjo", "quantum computing"
   lastReferencedAt: timestamp("last_referenced_at").defaultNow(),
   createdAt: timestamp("created_at").defaultNow(),
 });

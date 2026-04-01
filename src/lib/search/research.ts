@@ -108,6 +108,8 @@ export async function deepResearch(
               content: fact.content,
               category: fact.category,
               importance: fact.importance || 5,
+              source: "research",
+              topic: query,
             });
             progress.factsExtracted++;
           }
