@@ -21,22 +21,16 @@ export default function RootLayout({
               Nicole
             </a>
             <div className="flex gap-6 text-sm text-[var(--muted)]">
-              <a href="/library" className="hover:text-[var(--foreground)] transition-colors">
+              <a
+                href="/library"
+                className="hover:text-[var(--foreground)] transition-colors"
+              >
                 Library
-              </a>
-              <a href="/study" className="hover:text-[var(--foreground)] transition-colors">
-                Study
-              </a>
-              <a href="/research" className="hover:text-[var(--foreground)] transition-colors">
-                Research
-              </a>
-              <a href="/write" className="hover:text-[var(--foreground)] transition-colors">
-                Write
               </a>
             </div>
           </nav>
 
-          <main className="py-8">{children}</main>
+          <main className="py-4">{children}</main>
         </div>
       </body>
     </html>
