@@ -5,6 +5,12 @@ import { eq, asc } from "drizzle-orm";
 import { chat } from "@/lib/ai/router";
 import { buildSystemPrompt } from "@/lib/ai/personality";
 import { ChatMessage } from "@/lib/ai/types";
+import {
+  loadMemories,
+  loadRecentConversations,
+  saveConversation,
+  extractAndStoreMemories,
+} from "@/lib/ai/memory";
 
 export async function POST(req: NextRequest) {
   try {
@@ -17,30 +23,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Fetch recent chunks with source titles for context
-    let sourceContext: string | undefined;
+    // Load memories, recent conversations, and source context in parallel
+    const [memoryText, recentText, sourceContext] = await Promise.all([
+      loadMemories(),
+      loadRecentConversations(),
+      loadSourceContext(),
+    ]);
 
-    try {
-      const recentChunks = await db
-        .select({
-          content: chunks.content,
-          title: sources.title,
-        })
-        .from(chunks)
-        .leftJoin(sources, eq(chunks.sourceId, sources.id))
-        .orderBy(asc(chunks.position))
-        .limit(50);
-
-      if (recentChunks.length > 0) {
-        sourceContext = recentChunks
-          .map((c) => `[${c.title || "Unknown"}]\n${c.content}`)
-          .join("\n\n---\n\n");
-      }
-    } catch {
-      // DB might not have data yet
-    }
-
-    const systemPrompt = buildSystemPrompt(sourceContext);
+    const systemPrompt = buildSystemPrompt({
+      memories: memoryText || undefined,
+      recentConversations: recentText || undefined,
+      sourceContext: sourceContext || undefined,
+    });
 
     const fullMessages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
@@ -49,7 +43,19 @@ export async function POST(req: NextRequest) {
 
     const response = await chat(fullMessages);
 
-    return NextResponse.json({ content: response });
+    const content =
+      typeof response === "string" ? response : String(response);
+
+    // Save conversation and extract memories in the background
+    const allMessages: ChatMessage[] = [
+      ...messages,
+      { role: "assistant", content },
+    ];
+
+    saveConversation(allMessages).catch(() => {});
+    extractAndStoreMemories(allMessages).catch(() => {});
+
+    return NextResponse.json({ content });
   } catch (error) {
     console.error("Nicole error:", error);
     return NextResponse.json(
@@ -57,4 +63,25 @@ export async function POST(req: NextRequest) {
       { status: 503 }
     );
   }
+}
+
+async function loadSourceContext(): Promise<string> {
+  try {
+    const recentChunks = await db
+      .select({
+        content: chunks.content,
+        title: sources.title,
+      })
+      .from(chunks)
+      .leftJoin(sources, eq(chunks.sourceId, sources.id))
+      .orderBy(asc(chunks.position))
+      .limit(50);
+
+    if (recentChunks.length > 0) {
+      return recentChunks
+        .map((c) => `[${c.title || "Unknown"}]\n${c.content}`)
+        .join("\n\n---\n\n");
+    }
+  } catch {}
+  return "";
 }

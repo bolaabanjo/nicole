@@ -123,6 +123,25 @@ export const sessions = pgTable("sessions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Memories: things Nicole remembers about Roy
+export const memories = pgTable("memories", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  content: text("content").notNull(), // the memory itself
+  category: text("category").notNull(), // 'personal', 'preference', 'goal', 'fact', 'context'
+  importance: integer("importance").default(5), // 1-10, higher = more important
+  lastReferencedAt: timestamp("last_referenced_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Conversations: full chat history
+export const conversations = pgTable("conversations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  messages: jsonb("messages").notNull(), // array of {role, content}
+  summary: text("summary"), // AI-generated summary of the conversation
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 // Notes / writing drafts
 export const notes = pgTable("notes", {
   id: uuid("id").primaryKey().defaultRandom(),
