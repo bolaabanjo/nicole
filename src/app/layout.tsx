@@ -13,10 +13,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="antialiased min-h-screen" suppressHydrationWarning>
-        <div className="max-w-3xl mx-auto px-6">
-          {/* Nav */}
-          <nav className="flex items-center justify-between py-6 border-b border-[var(--border)]">
+      <body className="antialiased h-dvh overflow-hidden" suppressHydrationWarning>
+        <div className="h-full flex flex-col max-w-3xl mx-auto px-6">
+          {/* Nav — fixed at top */}
+          <nav className="flex-shrink-0 flex items-center justify-between py-4 border-b border-[var(--border)]">
             <a href="/" className="text-lg font-semibold tracking-tight">
               Nicole
             </a>
@@ -30,7 +30,7 @@ export default function RootLayout({
             </div>
           </nav>
 
-          <main className="py-4">{children}</main>
+          <main className="flex-1 min-h-0">{children}</main>
         </div>
       </body>
     </html>

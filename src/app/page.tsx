@@ -147,9 +147,9 @@ export default function Chat() {
   let lastDateKey = "";
 
   return (
-    <div className="flex flex-col" style={{ height: "calc(100vh - 100px)" }}>
+    <div className="flex flex-col h-full">
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {/* Conversation */}
         <div className="space-y-6 py-4">
           {messages.map((msg, i) => {
@@ -210,8 +210,8 @@ export default function Chat() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
-      <div className="pb-4 pt-2">
+      {/* Input — fixed at bottom */}
+      <div className="flex-shrink-0 pb-4 pt-2">
         <div className="relative">
           <textarea
             ref={inputRef}
