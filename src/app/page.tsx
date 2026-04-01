@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { ArrowUpIcon } from "@heroicons/react/24/solid";
 
 interface Message {
   role: "user" | "assistant";
@@ -181,10 +182,7 @@ export default function Chat() {
             disabled={sending || !input.trim()}
             className="absolute right-0 bottom-2.5 p-1.5 text-[var(--muted)] hover:text-[var(--foreground)] transition-colors disabled:opacity-0"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
+            <ArrowUpIcon className="w-4 h-4" />
           </button>
         </div>
       </div>
