@@ -7,38 +7,41 @@ import { buildSystemPrompt } from "@/lib/ai/personality";
 import { ChatMessage } from "@/lib/ai/types";
 import {
   loadMemories,
-  loadRecentConversations,
-  saveConversation,
+  loadRecentMessages,
+  saveChatMessage,
   extractAndStoreMemories,
 } from "@/lib/ai/memory";
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages }: { messages: ChatMessage[] } = await req.json();
+    const { message }: { message: string } = await req.json();
 
-    if (!messages || messages.length === 0) {
+    if (!message?.trim()) {
       return NextResponse.json(
-        { error: "Messages are required" },
+        { error: "Message is required" },
         { status: 400 }
       );
     }
 
-    // Load memories, recent conversations, and source context in parallel
-    const [memoryText, recentText, sourceContext] = await Promise.all([
+    // Save the user's message immediately
+    await saveChatMessage("user", message);
+
+    // Load context in parallel
+    const [memoryText, recentMessages, sourceContext] = await Promise.all([
       loadMemories(),
-      loadRecentConversations(),
+      loadRecentMessages(),
       loadSourceContext(),
     ]);
 
     const systemPrompt = buildSystemPrompt({
       memories: memoryText || undefined,
-      recentConversations: recentText || undefined,
       sourceContext: sourceContext || undefined,
     });
 
+    // Use recent chat history as conversation context
     const fullMessages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
-      ...messages,
+      ...recentMessages,
     ];
 
     const response = await chat(fullMessages);
@@ -46,14 +49,15 @@ export async function POST(req: NextRequest) {
     const content =
       typeof response === "string" ? response : String(response);
 
-    // Save conversation and extract memories in the background
-    const allMessages: ChatMessage[] = [
-      ...messages,
+    // Save Nicole's response
+    await saveChatMessage("assistant", content);
+
+    // Extract memories in the background from the last exchange
+    const lastExchange: ChatMessage[] = [
+      { role: "user", content: message },
       { role: "assistant", content },
     ];
-
-    saveConversation(allMessages).catch(() => {});
-    extractAndStoreMemories(allMessages).catch(() => {});
+    extractAndStoreMemories(lastExchange).catch(() => {});
 
     return NextResponse.json({ content });
   } catch (error) {

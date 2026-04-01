@@ -133,13 +133,12 @@ export const memories = pgTable("memories", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// Conversations: full chat history
-export const conversations = pgTable("conversations", {
+// Chat messages: the one continuous conversation with Nicole
+export const chatMessages = pgTable("chat_messages", {
   id: uuid("id").primaryKey().defaultRandom(),
-  messages: jsonb("messages").notNull(), // array of {role, content}
-  summary: text("summary"), // AI-generated summary of the conversation
+  role: text("role").notNull(), // 'user' | 'assistant'
+  content: text("content").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 // Notes / writing drafts

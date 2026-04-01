@@ -3,48 +3,90 @@
 import { useState, useRef, useEffect } from "react";
 import { ArrowRightIcon } from "@heroicons/react/24/solid";
 
-interface Message {
+interface ChatMsg {
+  id?: string;
   role: "user" | "assistant";
   content: string;
+  createdAt?: string;
 }
 
 function getGreeting(): string {
   const hour = new Date().getHours();
-  if (hour < 12) return "Good morning, Roy. ";
-  if (hour < 17) return "Hey, Roy. ";
-  if (hour < 21) return "Evening, Roy. ";
-  return "Late one tonight, Roy. ";
+  if (hour < 12) return "Good morning, Roy.";
+  if (hour < 17) return "Hey, Roy.";
+  if (hour < 21) return "Evening, Roy.";
+  return "Late one tonight, Roy.";
+}
+
+function formatDateLabel(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const msgDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.floor(
+    (today.getTime() - msgDate.getTime()) / (1000 * 60 * 60 * 24)
+  );
+
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) {
+    return date.toLocaleDateString("en-US", { weekday: "long" });
+  }
+  return date.toLocaleDateString("en-US", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function getDateKey(dateStr: string): string {
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
 export default function Chat() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [greeted, setGreeted] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Load chat history on mount
+  useEffect(() => {
+    fetch("/api/nicole/history")
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setMessages(data);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
 
   // Auto-scroll on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Focus input on load
+  // Focus input when loaded
   useEffect(() => {
-    inputRef.current?.focus();
-    setGreeted(true);
-  }, []);
+    if (loaded) inputRef.current?.focus();
+  }, [loaded]);
 
   const sendMessage = async () => {
     if (!input.trim() || sending) return;
 
-    const userMessage: Message = { role: "user", content: input.trim() };
-    const updatedMessages = [...messages, userMessage];
-    setMessages(updatedMessages);
+    const userMsg: ChatMsg = {
+      role: "user",
+      content: input.trim(),
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setSending(true);
 
-    // Auto-resize textarea back to default
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
@@ -53,7 +95,7 @@ export default function Chat() {
       const res = await fetch("/api/nicole", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: updatedMessages }),
+        body: JSON.stringify({ message: userMsg.content }),
       });
 
       const data = await res.json();
@@ -61,7 +103,11 @@ export default function Chat() {
       if (!res.ok) {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: data.error || "Something went wrong." },
+          {
+            role: "assistant",
+            content: data.error || "Something went wrong.",
+            createdAt: new Date().toISOString(),
+          },
         ]);
         return;
       }
@@ -71,11 +117,18 @@ export default function Chat() {
           ? data.content
           : data.content?.toString() || "...";
 
-      setMessages((prev) => [...prev, { role: "assistant", content }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content, createdAt: new Date().toISOString() },
+      ]);
     } catch {
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: "I'm offline right now." },
+        {
+          role: "assistant",
+          content: "I'm offline right now.",
+          createdAt: new Date().toISOString(),
+        },
       ]);
     } finally {
       setSending(false);
@@ -92,18 +145,20 @@ export default function Chat() {
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
-    // Auto-resize
     const textarea = e.target;
     textarea.style.height = "auto";
     textarea.style.height = Math.min(textarea.scrollHeight, 160) + "px";
   };
 
+  // Build messages with date separators
+  let lastDateKey = "";
+
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 100px)" }}>
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
-        {/* Nicole's greeting */}
-        {greeted && messages.length === 0 && (
+        {/* Greeting when no history */}
+        {loaded && messages.length === 0 && (
           <div className="py-8">
             <div className="text-sm text-[var(--muted)] mb-1 font-mono">
               nicole
@@ -116,29 +171,41 @@ export default function Chat() {
 
         {/* Conversation */}
         <div className="space-y-6 py-4">
-          {messages.map((msg, i) => (
-            <div key={i}>
-              {msg.role === "assistant" ? (
-                <div>
-                  <div className="text-sm text-[var(--muted)] mb-1 font-mono">
-                    nicole
+          {messages.map((msg, i) => {
+            const dateKey = msg.createdAt ? getDateKey(msg.createdAt) : "";
+            const showDateSep = dateKey && dateKey !== lastDateKey;
+            if (dateKey) lastDateKey = dateKey;
+
+            return (
+              <div key={msg.id || i}>
+                {/* Date separator */}
+                {showDateSep && msg.createdAt && (
+                  <div className="flex justify-center py-4">
+                    <span className="text-xs text-[var(--muted)] font-mono opacity-50">
+                      {formatDateLabel(msg.createdAt)}
+                    </span>
                   </div>
-                  <div className="text-sm leading-relaxed whitespace-pre-wrap">
-                    {msg.content}
-                    {sending && i === messages.length - 1 && (
-                      <span className="inline-block w-1.5 h-4 bg-[var(--muted)] ml-0.5 animate-pulse" />
-                    )}
+                )}
+
+                {msg.role === "assistant" ? (
+                  <div>
+                    <div className="text-sm text-[var(--muted)] mb-1 font-mono">
+                      nicole
+                    </div>
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                      {msg.content}
+                    </div>
                   </div>
-                </div>
-              ) : (
-                <div className="flex justify-end">
-                  <div className="text-sm leading-relaxed text-[var(--muted)] max-w-[85%] whitespace-pre-wrap">
-                    {msg.content}
+                ) : (
+                  <div className="flex justify-end">
+                    <div className="text-sm leading-relaxed text-[var(--muted)] max-w-[85%] whitespace-pre-wrap">
+                      {msg.content}
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
-          ))}
+                )}
+              </div>
+            );
+          })}
 
           {/* Thinking indicator */}
           {sending && messages[messages.length - 1]?.role === "user" && (

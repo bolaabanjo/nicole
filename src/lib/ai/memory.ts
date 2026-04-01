@@ -1,6 +1,6 @@
 import { db } from "@/lib/db/client";
-import { memories, conversations } from "@/lib/db/schema";
-import { desc } from "drizzle-orm";
+import { memories, chatMessages } from "@/lib/db/schema";
+import { desc, asc } from "drizzle-orm";
 import { chat } from "./router";
 import { ChatMessage } from "./types";
 
@@ -37,8 +37,6 @@ export async function extractAndStoreMemories(
     ]);
 
     const text = typeof response === "string" ? response : String(response);
-
-    // Parse the JSON response
     const cleaned = text.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
     const extracted = JSON.parse(cleaned);
 
@@ -55,7 +53,6 @@ export async function extractAndStoreMemories(
     }
   } catch (error) {
     console.error("Memory extraction failed:", error);
-    // Non-critical — conversation still works without new memories
   }
 }
 
@@ -75,65 +72,64 @@ export async function loadMemories(limit = 30): Promise<string> {
 
     if (mems.length === 0) return "";
 
-    return mems
-      .map((m) => `[${m.category}] ${m.content}`)
-      .join("\n");
+    return mems.map((m) => `[${m.category}] ${m.content}`).join("\n");
   } catch {
     return "";
   }
 }
 
 /**
- * Save a conversation to the database.
+ * Save a single message to the chat history.
  */
-export async function saveConversation(
-  messages: ChatMessage[]
-): Promise<string | null> {
+export async function saveChatMessage(
+  role: "user" | "assistant",
+  content: string
+): Promise<void> {
   try {
-    const [conv] = await db
-      .insert(conversations)
-      .values({ messages: JSON.stringify(messages) })
-      .returning();
-    return conv.id;
+    await db.insert(chatMessages).values({ role, content });
   } catch (error) {
-    console.error("Failed to save conversation:", error);
-    return null;
+    console.error("Failed to save chat message:", error);
   }
 }
 
 /**
- * Load recent conversation history for context.
+ * Load recent chat messages for context (sent to the AI).
  */
-export async function loadRecentConversations(limit = 3): Promise<string> {
+export async function loadRecentMessages(limit = 20): Promise<ChatMessage[]> {
   try {
-    const recent = await db
+    const msgs = await db
       .select({
-        messages: conversations.messages,
-        summary: conversations.summary,
-        createdAt: conversations.createdAt,
+        role: chatMessages.role,
+        content: chatMessages.content,
       })
-      .from(conversations)
-      .orderBy(desc(conversations.createdAt))
+      .from(chatMessages)
+      .orderBy(desc(chatMessages.createdAt))
       .limit(limit);
 
-    if (recent.length === 0) return "";
-
-    return recent
-      .map((c) => {
-        if (c.summary) return `[Previous conversation] ${c.summary}`;
-        const msgs = typeof c.messages === "string"
-          ? JSON.parse(c.messages)
-          : c.messages;
-        if (!Array.isArray(msgs)) return "";
-        // Just grab the last few messages as context
-        const tail = msgs.slice(-4);
-        return tail
-          .map((m: any) => `${m.role}: ${m.content}`)
-          .join("\n");
-      })
-      .filter(Boolean)
-      .join("\n---\n");
+    // Reverse so they're in chronological order
+    return msgs.reverse() as ChatMessage[];
   } catch {
-    return "";
+    return [];
+  }
+}
+
+/**
+ * Load all chat messages for display, with timestamps for date separators.
+ */
+export async function loadAllMessages(): Promise<
+  { id: string; role: string; content: string; createdAt: Date | null }[]
+> {
+  try {
+    return await db
+      .select({
+        id: chatMessages.id,
+        role: chatMessages.role,
+        content: chatMessages.content,
+        createdAt: chatMessages.createdAt,
+      })
+      .from(chatMessages)
+      .orderBy(asc(chatMessages.createdAt));
+  } catch {
+    return [];
   }
 }
