@@ -13,7 +13,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="antialiased min-h-screen">
+      <body className="antialiased min-h-screen" suppressHydrationWarning>
         <div className="max-w-3xl mx-auto px-6">
           {/* Nav */}
           <nav className="flex items-center justify-between py-6 border-b border-[var(--border)]">
