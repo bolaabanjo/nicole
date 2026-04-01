@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { ArrowUpIcon } from "@heroicons/react/24/solid";
+import { ArrowRightIcon } from "@heroicons/react/24/solid";
 
 interface Message {
   role: "user" | "assistant";
@@ -10,10 +10,10 @@ interface Message {
 
 function getGreeting(): string {
   const hour = new Date().getHours();
-  if (hour < 12) return "Good morning, Roy.";
-  if (hour < 17) return "Hey, Roy.";
-  if (hour < 21) return "Evening, Roy.";
-  return "Late one tonight, Roy.";
+  if (hour < 12) return "Good morning, Roy. ";
+  if (hour < 17) return "Hey, Roy. ";
+  if (hour < 21) return "Evening, Roy. ";
+  return "Late one tonight, Roy. ";
 }
 
 export default function Chat() {
@@ -182,7 +182,7 @@ export default function Chat() {
             disabled={sending || !input.trim()}
             className="absolute right-0 bottom-2.5 p-1.5 text-[var(--muted)] hover:text-[var(--foreground)] transition-colors disabled:opacity-0"
           >
-            <ArrowUpIcon className="w-4 h-4" />
+            <ArrowRightIcon className="w-4 h-4" />
           </button>
         </div>
       </div>
