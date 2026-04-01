@@ -164,8 +164,8 @@ export default function Chat() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-[var(--border)] pt-4 pb-2">
-        <div className="flex gap-3 items-end">
+      <div className="pb-4 pt-2">
+        <div className="relative">
           <textarea
             ref={inputRef}
             value={input}
@@ -173,15 +173,15 @@ export default function Chat() {
             onKeyDown={handleKeyDown}
             placeholder="Talk to Nicole..."
             rows={1}
-            className="flex-1 bg-transparent border border-[var(--border)] px-4 py-3 text-sm outline-none focus:border-[var(--muted)] transition-colors resize-none overflow-hidden"
-            style={{ minHeight: "46px" }}
+            className="w-full bg-transparent border-b border-[var(--border)] px-1 py-3 text-sm outline-none focus:border-[var(--muted)] transition-colors resize-none overflow-hidden pr-12"
+            style={{ minHeight: "40px" }}
           />
           <button
             onClick={sendMessage}
             disabled={sending || !input.trim()}
-            className="px-4 py-3 text-sm border border-[var(--foreground)] text-[var(--foreground)] hover:bg-[var(--foreground)] hover:text-[var(--background)] transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
+            className="absolute right-1 bottom-3 text-xs text-[var(--muted)] hover:text-[var(--foreground)] transition-colors disabled:opacity-0"
           >
-            Send
+            ↵
           </button>
         </div>
       </div>
