@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { ArrowRightIcon } from "@heroicons/react/24/solid";
+import { Markdown } from "@/components/Markdown";
 
 interface ChatMsg {
   id?: string;
@@ -172,9 +173,7 @@ export default function Chat() {
                     <div className="text-sm text-[var(--muted)] mb-1 font-mono">
                       nicole
                     </div>
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap">
-                      {msg.content}
-                    </div>
+                    <Markdown content={msg.content} />
                   </div>
                 ) : (
                   <div className="flex justify-end">
