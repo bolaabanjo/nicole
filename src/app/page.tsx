@@ -175,7 +175,7 @@ export default function Chat() {
             placeholder="Talk to Nicole..."
             rows={1}
             className="w-full bg-transparent border-b border-[var(--border)] px-1 py-3 text-sm outline-none focus:border-[var(--muted)] transition-colors resize-none overflow-hidden pr-12"
-            style={{ minHeight: "40px" }}
+            style={{ minHeight: "40px", fontSize: "16px" }}
           />
           <button
             onClick={sendMessage}
