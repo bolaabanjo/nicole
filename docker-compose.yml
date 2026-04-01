@@ -11,5 +11,15 @@ services:
       - "5432:5432"
     restart: unless-stopped
 
+  search:
+    image: searxng/searxng:latest
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    volumes:
+      - ./searxng:/etc/searxng
+    ports:
+      - "8888:8080"
+    restart: unless-stopped
+
 volumes:
   pgdata:

@@ -11,6 +11,14 @@ import {
   saveChatMessage,
   extractAndStoreMemories,
 } from "@/lib/ai/memory";
+import { searchWeb, formatSearchResults } from "@/lib/search/web";
+
+const SEARCH_INTENT_PROMPT = `Determine if this message requires a web search to answer properly. Return ONLY a JSON object:
+- If search needed: {"search": true, "query": "optimized search query"}
+- If no search needed: {"search": false}
+
+Messages that need search: current events, recent news, "look up", "search for", "what's the latest", facts you're unsure about, anything time-sensitive.
+Messages that don't need search: personal conversation, opinions, things from memory, study/source material questions, greetings.`;
 
 export async function POST(req: NextRequest) {
   try {
@@ -33,14 +41,45 @@ export async function POST(req: NextRequest) {
       loadSourceContext(),
     ]);
 
+    // Check if Nicole needs to search the web
+    let searchContext = "";
+    try {
+      const intentResponse = await chat([
+        { role: "system", content: SEARCH_INTENT_PROMPT },
+        { role: "user", content: message },
+      ]);
+
+      const intentText =
+        typeof intentResponse === "string"
+          ? intentResponse
+          : String(intentResponse);
+      const cleaned = intentText
+        .replace(/```json?\n?/g, "")
+        .replace(/```/g, "")
+        .trim();
+      const intent = JSON.parse(cleaned);
+
+      if (intent.search && intent.query) {
+        const results = await searchWeb(intent.query);
+        searchContext = formatSearchResults(results);
+      }
+    } catch {
+      // Search intent detection failed — not critical, continue without search
+    }
+
     const systemPrompt = buildSystemPrompt({
       memories: memoryText || undefined,
       sourceContext: sourceContext || undefined,
     });
 
-    // Use recent chat history as conversation context
+    // Build full prompt with search results if any
+    let fullSystemPrompt = systemPrompt;
+    if (searchContext) {
+      fullSystemPrompt += `\n\n## Web search results\nYou searched the web for the user's question. Use these results naturally — don't list them as bullet points, weave the information into your response. Cite sources briefly if relevant.\n\n${searchContext}`;
+    }
+
     const fullMessages: ChatMessage[] = [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: fullSystemPrompt },
       ...recentMessages,
     ];
 
@@ -52,7 +91,7 @@ export async function POST(req: NextRequest) {
     // Save Nicole's response
     await saveChatMessage("assistant", content);
 
-    // Extract memories in the background from the last exchange
+    // Extract memories in the background
     const lastExchange: ChatMessage[] = [
       { role: "user", content: message },
       { role: "assistant", content },
@@ -63,7 +102,10 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error("Nicole error:", error);
     return NextResponse.json(
-      { error: "I can't reach my brain right now. Are you connected to the internet?" },
+      {
+        error:
+          "I can't reach my brain right now. Are you connected to the internet?",
+      },
       { status: 503 }
     );
   }
