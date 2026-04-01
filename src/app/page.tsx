@@ -10,14 +10,6 @@ interface ChatMsg {
   createdAt?: string;
 }
 
-function getGreeting(): string {
-  const hour = new Date().getHours();
-  if (hour < 12) return "Good morning, Roy.";
-  if (hour < 17) return "Hey, Roy.";
-  if (hour < 21) return "Evening, Roy.";
-  return "Late one tonight, Roy.";
-}
-
 function formatDateLabel(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -157,18 +149,6 @@ export default function Chat() {
     <div className="flex flex-col" style={{ height: "calc(100vh - 100px)" }}>
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
-        {/* Greeting when no history */}
-        {loaded && messages.length === 0 && (
-          <div className="py-8">
-            <div className="text-sm text-[var(--muted)] mb-1 font-mono">
-              nicole
-            </div>
-            <div className="text-sm leading-relaxed">
-              {getGreeting()} What&apos;s on your mind?
-            </div>
-          </div>
-        )}
-
         {/* Conversation */}
         <div className="space-y-6 py-4">
           {messages.map((msg, i) => {
