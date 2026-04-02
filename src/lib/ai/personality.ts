@@ -59,6 +59,7 @@ export function buildSystemPrompt(opts: {
   memories?: string;
   conversationSummaries?: string;
   sourceContext?: string;
+  workspaceContext?: string;
 }): string {
   let prompt = NICOLE_SYSTEM_PROMPT;
 
@@ -72,6 +73,10 @@ export function buildSystemPrompt(opts: {
 
   if (opts.sourceContext) {
     prompt += `\n\n## Source material\n${opts.sourceContext}`;
+  }
+
+  if (opts.workspaceContext) {
+    prompt += `\n\n## Current workspace context\n${opts.workspaceContext}`;
   }
 
   return prompt;

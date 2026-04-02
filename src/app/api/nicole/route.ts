@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  formatWorkspaceContextForPrompt,
+  NicoleChatRequest,
+  normalizeWorkspaceContext,
+} from "@/lib/ai/context";
 import { chat } from "@/lib/ai/router";
 import { buildSystemPrompt } from "@/lib/ai/personality";
 import { ChatMessage } from "@/lib/ai/types";
@@ -19,7 +24,8 @@ import { loadRelevantSourceContext } from "@/lib/search/semantic";
 
 export async function POST(req: NextRequest) {
   try {
-    const { message }: { message: string } = await req.json();
+    const { message, context }: NicoleChatRequest = await req.json();
+    const workspaceContext = normalizeWorkspaceContext(context);
 
     if (!message?.trim()) {
       return NextResponse.json(
@@ -43,6 +49,7 @@ export async function POST(req: NextRequest) {
       conversationSummaries: summaryText || undefined,
       memories: memoryText || undefined,
       sourceContext: sourceContext || undefined,
+      workspaceContext: formatWorkspaceContextForPrompt(workspaceContext),
     });
 
     // Build full prompt with search results if any
