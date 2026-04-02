@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { startTransition, useState, useRef, useEffect } from 'react';
 import { ArrowUp, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
@@ -24,6 +24,8 @@ interface ParsedAssistantContent {
   responseText: string;
   reasoningStreaming: boolean;
 }
+
+const HISTORY_POLL_INTERVAL_MS = 5000;
 
 function parseAssistantContent(content: string): ParsedAssistantContent {
   const leadingThoughtMatch = content.match(/^\s*<thought>/i);
@@ -99,6 +101,23 @@ const MessageParts = ({
   );
 };
 
+function normalizeChatMessage(message: Partial<ChatMsg> & { role?: string; content?: string }): ChatMsg {
+  return {
+    id:
+      typeof message.id === 'string' && message.id.length > 0
+        ? message.id
+        : String(Math.random()),
+    role: message.role === 'assistant' ? 'assistant' : 'user',
+    content: message.content || '',
+    createdAt:
+      typeof message.createdAt === 'string'
+        ? message.createdAt
+        : message.createdAt
+          ? new Date(message.createdAt).toISOString()
+          : undefined,
+  };
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -108,18 +127,42 @@ export default function Chat() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isSyncingRef = useRef(false);
+
+  const syncHistory = async (force = false) => {
+    if (isSyncingRef.current) return;
+    if (!force && (sending || streaming)) return;
+
+    isSyncingRef.current = true;
+
+    try {
+      const res = await fetch('/api/nicole/history', {
+        cache: 'no-store',
+      });
+
+      if (!res.ok) return;
+
+      const data = await res.json();
+      if (!Array.isArray(data)) return;
+
+      const nextMessages = data.map((message: Partial<ChatMsg>) =>
+        normalizeChatMessage(message)
+      );
+
+      startTransition(() => {
+        setMessages(nextMessages);
+      });
+    } catch {
+      // Non-fatal: keep local UI state if history sync fails.
+    } finally {
+      isSyncingRef.current = false;
+      setLoaded(true);
+    }
+  };
 
   // Load chat history on mount
   useEffect(() => {
-    fetch('/api/nicole/history')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) {
-          setMessages(data.map((m: any) => ({ ...m, id: m.id || String(Math.random()) })));
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoaded(true));
+    void syncHistory(true);
   }, []);
 
   // Auto-scroll on-new messages
@@ -131,6 +174,33 @@ export default function Chat() {
   useEffect(() => {
     if (loaded) textareaRef.current?.focus();
   }, [loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+
+    const interval = window.setInterval(() => {
+      void syncHistory();
+    }, HISTORY_POLL_INTERVAL_MS);
+
+    const handleFocus = () => {
+      void syncHistory(true);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void syncHistory(true);
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [loaded, sending, streaming]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -237,6 +307,7 @@ export default function Chat() {
       setStreaming(false);
       setSending(false);
       textareaRef.current?.focus();
+      void syncHistory(true);
     }
   };
 

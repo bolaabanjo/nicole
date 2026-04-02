@@ -1,7 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db/client";
-import { sources, chunks } from "@/lib/db/schema";
-import { eq, asc } from "drizzle-orm";
 import { chat } from "@/lib/ai/router";
 import { buildSystemPrompt } from "@/lib/ai/personality";
 import { ChatMessage } from "@/lib/ai/types";
@@ -13,6 +10,7 @@ import {
 } from "@/lib/ai/memory";
 import { searchWeb, formatSearchResults } from "@/lib/search/web";
 import { deepResearch } from "@/lib/search/research";
+import { loadRelevantSourceContext } from "@/lib/search/semantic";
 
 const SEARCH_INTENT_PROMPT = `Determine if this message requires a web search or deep research to answer properly. Return ONLY a JSON object:
 - If deep research needed (e.g. "look me up", "search me", "find out about me", "research [person]"): {"search": true, "deep": true, "query": "person's full name or search terms"}
@@ -41,7 +39,7 @@ export async function POST(req: NextRequest) {
     const [memoryText, recentMessages, sourceContext] = await Promise.all([
       loadMemories(),
       loadRecentMessages(),
-      loadSourceContext(),
+      loadRelevantSourceContext(message),
     ]);
 
     // Check if Nicole needs to search the web
@@ -118,25 +116,4 @@ export async function POST(req: NextRequest) {
       { status: 503 }
     );
   }
-}
-
-async function loadSourceContext(): Promise<string> {
-  try {
-    const recentChunks = await db
-      .select({
-        content: chunks.content,
-        title: sources.title,
-      })
-      .from(chunks)
-      .leftJoin(sources, eq(chunks.sourceId, sources.id))
-      .orderBy(asc(chunks.position))
-      .limit(50);
-
-    if (recentChunks.length > 0) {
-      return recentChunks
-        .map((c) => `[${c.title || "Unknown"}]\n${c.content}`)
-        .join("\n\n---\n\n");
-    }
-  } catch {}
-  return "";
 }
