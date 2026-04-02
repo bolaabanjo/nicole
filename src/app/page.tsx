@@ -575,14 +575,11 @@ export default function Chat() {
       </main>
 
       {/* Fixed Bottom Input */}
-      <div
-        className="fixed left-0 right-0 z-20 border-t border-border/40 bg-background px-[max(0.75rem,env(safe-area-inset-left))] pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 shadow-[0_-16px_40px_rgba(0,0,0,0.38)] sm:bottom-0 sm:px-4 sm:pb-8 sm:pt-4"
-        style={{ bottom: `${browserKeyboardInset}px` }}
-      >
-        <div className="w-full max-w-3xl sm:mx-auto">
+      <div className="fixed bottom-0 left-0 right-0 p-4 bg-background/80 backdrop-blur-sm pb-8">
+        <div className="max-w-3xl mx-auto">
           {/* File Preview */}
           {selectedFile && (
-            <div className="mb-3 ml-2 flex items-center gap-2 sm:ml-4">
+            <div className="flex items-center gap-2 mb-3 ml-4">
               <div className="relative w-12 h-12 rounded-lg overflow-hidden flex items-center justify-center bg-muted">
                 {selectedFile.type.startsWith('image/') ? (
                   <img
@@ -604,7 +601,7 @@ export default function Chat() {
           )}
 
           <form onSubmit={handleSubmit}>
-            <div className="relative flex items-center gap-2 rounded-full border border-border/60 bg-card px-2.5 py-2 pl-3 transition-all hover:border-border/80 hover:bg-card focus-within:border-white/20 focus-within:bg-card">
+            <div className="relative flex items-center gap-2 rounded-full border border-border/50 bg-muted/20 px-2.5 pl-3 py-2 transition-all hover:bg-muted/30 hover:border-border/80 focus-within:border-white/20 focus-within:bg-muted/30">
               <label htmlFor="file-input" className="flex items-center justify-center cursor-pointer text-muted-foreground hover:text-foreground transition-colors">
                 <Plus className="h-4 w-4" />
               </label>
@@ -618,16 +615,16 @@ export default function Chat() {
                 ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onFocus={() => setIsComposerFocused(true)}
-                onBlur={() => {
-                  setIsComposerFocused(false);
-                  setBrowserKeyboardInset(0);
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit(e);
+                  }
                 }}
                 placeholder="Talk to Nicole..."
                 rows={1}
-                className="max-h-32 flex-1 resize-none bg-transparent py-2 text-[16px] leading-6 placeholder:text-muted-foreground focus:outline-none"
-                style={{ minHeight: '24px', fontSize: '16px' }}
+                className="flex-1 resize-none bg-transparent py-2 text-sm placeholder:text-muted-foreground focus:outline-none max-h-32"
+                style={{ minHeight: "24px" }}
               />
               <div className="flex-shrink-0">
                 <Button

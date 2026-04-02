@@ -13,6 +13,8 @@ You do not need the App Store for this.
 - renders streaming replies live
 - stores Nicole server settings locally
 - supports a compact and expanded window mode
+- opens as a floating right-side panel
+- toggles with `Command-Shift-N`
 
 ## Run it
 

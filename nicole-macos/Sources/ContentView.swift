@@ -46,11 +46,22 @@ struct ContentView: View {
     )
     .background(Color.black)
     .preferredColorScheme(.dark)
+    .background(
+      WindowAccessor { window in
+        OverlayWindowManager.shared.attach(
+          window: window,
+          preferredWidth: settings.windowMode.idealWidth
+        )
+      }
+    )
     .sheet(isPresented: $isShowingSettings) {
       SettingsView(settings: settings)
     }
     .task {
       await viewModel.loadHistory(baseURLString: settings.baseURLString)
+    }
+    .onChange(of: settings.windowMode) { _, mode in
+      OverlayWindowManager.shared.updatePreferredWidth(mode.idealWidth)
     }
   }
 
@@ -70,14 +81,6 @@ struct ContentView: View {
           .font(.system(size: 11, weight: .medium))
           .foregroundStyle(Color.white.opacity(0.42))
           .lineLimit(1)
-
-        if let lastRequestURL = viewModel.lastRequestURL, shouldShowDiagnostics {
-          Text("Last route: \(lastRequestURL)")
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(Color.white.opacity(0.32))
-            .lineLimit(1)
-            .textSelection(.enabled)
-        }
       }
 
       Spacer()
@@ -252,12 +255,12 @@ private extension ContentView {
     case .idle:
       return "Set the canonical Nicole server once and this app will keep using it."
     case .connecting:
-      return settings.derivedHostLabel.map { "Trying \($0)." } ?? "Trying the configured server."
+      return settings.derivedHostLabel.map { "Trying \($0). Toggle with Command-Shift-N." } ?? "Trying the configured server."
     case .connected(let messageCount):
       if messageCount == 0 {
         return "The server is up, but it returned no shared chat history yet."
       }
-      return "\(messageCount) shared messages loaded."
+      return "\(messageCount) shared messages loaded. Toggle with Command-Shift-N."
     case .syncing:
       return "Sending this conversation through the shared Nicole backend."
     case .failed:
@@ -279,10 +282,7 @@ private extension ContentView {
   }
 
   var shouldShowDiagnostics: Bool {
-    if case .failed = viewModel.connectionState {
-      return true
-    }
-    return false
+    false
   }
 
   var emptyStateBodyText: String {

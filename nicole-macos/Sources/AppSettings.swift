@@ -90,8 +90,10 @@ final class AppSettings: ObservableObject {
   }
 
   init() {
-    self.serverName =
-      UserDefaults.standard.string(forKey: Keys.serverName) ?? ""
+    let storedServerName = UserDefaults.standard.string(forKey: Keys.serverName) ?? ""
+    self.serverName = storedServerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      ? "Banjo"
+      : storedServerName
     self.baseURLString =
       UserDefaults.standard.string(forKey: Keys.baseURL) ?? ""
     self.windowMode =

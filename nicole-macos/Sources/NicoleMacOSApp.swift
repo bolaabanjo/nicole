@@ -12,5 +12,13 @@ struct NicoleMacOSApp: App {
     }
     .defaultSize(width: settings.windowMode.idealWidth, height: 760)
     .windowResizability(.contentSize)
+    .commands {
+      CommandMenu("Nicole") {
+        Button("Toggle Nicole") {
+          appDelegate.toggleNicolePanel()
+        }
+        .keyboardShortcut("n", modifiers: [.command, .shift])
+      }
+    }
   }
 }
