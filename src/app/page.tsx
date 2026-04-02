@@ -94,7 +94,7 @@ const MessageParts = ({
       )}
 
       {visibleContent && (
-        <div className="max-w-none">
+        <div className="max-w-none min-w-0">
           <MarkdownRenderer content={visibleContent} />
         </div>
       )}
@@ -399,13 +399,13 @@ export default function Chat() {
             const visibleAssistantText = parsedContent?.responseText || '';
 
             return (
-              <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
+              <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'w-full min-w-0 items-start'}`}>
                 {message.role === 'user' ? (
                   <div className="max-w-[90%] rounded-2xl rounded-br-md bg-primary px-3 py-2 text-primary-foreground sm:max-w-[85%]">
                     <p className="text-sm">{message.content}</p>
                   </div>
                 ) : (
-                  <div className="w-full max-w-none space-y-2">
+                  <div className="w-full min-w-0 max-w-none space-y-2">
                     <MessageParts
                       message={message}
                       isLastMessage={isLastMessage}

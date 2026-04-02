@@ -72,36 +72,36 @@ export function MarkdownRenderer({ content }: { content: string }) {
     };
 
     return (
-        <div className="max-w-none break-words text-sm text-foreground/90 leading-relaxed [&_strong]:font-bold [&_em]:italic">
+        <div className="max-w-none min-w-0 break-words text-sm text-foreground/90 leading-relaxed [overflow-wrap:anywhere] [&_a]:break-all [&_strong]:font-bold [&_em]:italic">
             <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeRaw]}
                 components={{
                     code({ className, children, node: _node, ...props }) {
                         const match = /language-(\w+)/.exec(className || "");
-                        const isInline = !match && !className?.includes("language-");
+                        const codeString = String(children).replace(/\n$/, "");
+                        const isBlockCode = Boolean(match) || codeString.includes("\n");
 
-                        if (!isInline && match) {
-                            const language = match[1];
-                            const codeString = String(children).replace(/\n$/, "");
+                        if (isBlockCode) {
+                            const language = match?.[1] || "code";
 
                             return (
-                                <div className="my-3 rounded-lg overflow-hidden border border-border/50 bg-muted/30 dark:bg-[#1e1e1e]">
+                                <div className="my-3 w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-muted/30 dark:bg-[#1e1e1e]">
                                     <div className="flex items-center justify-between px-3 py-1.5 bg-muted/50 dark:bg-white/5 border-b border-border/50 dark:border-white/5">
                                         <span className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider">{language}</span>
                                         <button onClick={() => copyCode(codeString)} className="text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
                                             <Copy className="h-3 w-3" />
                                         </button>
                                     </div>
-                                    <pre className="p-3 overflow-x-auto text-xs font-mono leading-relaxed bg-transparent m-0 border-0">
-                                        <code>{highlightCode(codeString, language)}</code>
+                                    <pre className="m-0 max-w-full overflow-x-auto overscroll-x-contain border-0 bg-transparent p-3 text-xs font-mono leading-relaxed">
+                                        <code className="block w-fit min-w-full whitespace-pre">{highlightCode(codeString, language)}</code>
                                     </pre>
                                 </div>
                             );
                         }
 
                         return (
-                            <code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono text-primary font-medium" {...props}>
+                            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.8125rem] font-medium text-primary whitespace-pre-wrap break-words [overflow-wrap:anywhere]" {...props}>
                                 {children}
                             </code>
                         );
