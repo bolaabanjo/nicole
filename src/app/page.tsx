@@ -26,6 +26,7 @@ interface ParsedAssistantContent {
 }
 
 const HISTORY_POLL_INTERVAL_MS = 5000;
+const AUTO_SCROLL_THRESHOLD_PX = 160;
 
 function parseAssistantContent(content: string): ParsedAssistantContent {
   const leadingThoughtMatch = content.match(/^\s*<thought>/i);
@@ -118,6 +119,30 @@ function normalizeChatMessage(message: Partial<ChatMsg> & { role?: string; conte
   };
 }
 
+function areMessagesEqual(current: ChatMsg[], next: ChatMsg[]): boolean {
+  if (current.length !== next.length) return false;
+
+  return current.every((message, index) => {
+    const nextMessage = next[index];
+    return (
+      message.id === nextMessage.id &&
+      message.role === nextMessage.role &&
+      message.content === nextMessage.content &&
+      message.createdAt === nextMessage.createdAt
+    );
+  });
+}
+
+function isNearBottom(): boolean {
+  if (typeof window === 'undefined') return true;
+
+  const scrollTop = window.scrollY;
+  const viewportHeight = window.innerHeight;
+  const documentHeight = document.documentElement.scrollHeight;
+
+  return documentHeight - (scrollTop + viewportHeight) <= AUTO_SCROLL_THRESHOLD_PX;
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -128,6 +153,8 @@ export default function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isSyncingRef = useRef(false);
+  const shouldStickToBottomRef = useRef(true);
+  const forceScrollOnNextUpdateRef = useRef(false);
 
   const syncHistory = async (force = false) => {
     if (isSyncingRef.current) return;
@@ -150,7 +177,11 @@ export default function Chat() {
       );
 
       startTransition(() => {
-        setMessages(nextMessages);
+        setMessages((currentMessages) =>
+          areMessagesEqual(currentMessages, nextMessages)
+            ? currentMessages
+            : nextMessages
+        );
       });
     } catch {
       // Non-fatal: keep local UI state if history sync fails.
@@ -165,15 +196,38 @@ export default function Chat() {
     void syncHistory(true);
   }, []);
 
-  // Auto-scroll on-new messages
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const shouldScroll =
+      forceScrollOnNextUpdateRef.current || shouldStickToBottomRef.current;
+
+    if (!shouldScroll) {
+      return;
+    }
+
+    messagesEndRef.current?.scrollIntoView({
+      behavior: loaded ? 'smooth' : 'auto',
+      block: 'end',
+    });
+    forceScrollOnNextUpdateRef.current = false;
   }, [messages]);
 
   // Focus input when loaded
   useEffect(() => {
     if (loaded) textareaRef.current?.focus();
   }, [loaded]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      shouldStickToBottomRef.current = isNearBottom();
+    };
+
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+    };
+  }, []);
 
   useEffect(() => {
     if (!loaded) return;
@@ -220,6 +274,9 @@ export default function Chat() {
 
   const sendMessage = async () => {
     if ((!input.trim() && !selectedFile) || sending) return;
+
+    forceScrollOnNextUpdateRef.current = true;
+    shouldStickToBottomRef.current = true;
 
     const userMsg: ChatMsg = {
       id: String(Date.now() - 1),
@@ -307,6 +364,8 @@ export default function Chat() {
       setStreaming(false);
       setSending(false);
       textareaRef.current?.focus();
+      forceScrollOnNextUpdateRef.current = true;
+      shouldStickToBottomRef.current = true;
       void syncHistory(true);
     }
   };
