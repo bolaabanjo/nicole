@@ -150,11 +150,14 @@ export default function Chat() {
   const [streaming, setStreaming] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [keyboardInset, setKeyboardInset] = useState(0);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isSyncingRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
   const forceScrollOnNextUpdateRef = useRef(false);
+  const viewportBaselineRef = useRef(0);
 
   const syncHistory = async (force = false) => {
     if (isSyncingRef.current) return;
@@ -255,6 +258,59 @@ export default function Chat() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [loaded, sending, streaming]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.visualViewport) {
+      return;
+    }
+
+    const viewport = window.visualViewport;
+    const KEYBOARD_THRESHOLD_PX = 120;
+
+    const syncKeyboardViewport = (resetBaseline = false) => {
+      const currentViewportBottom = viewport.height + viewport.offsetTop;
+
+      if (resetBaseline || viewportBaselineRef.current === 0) {
+        viewportBaselineRef.current = currentViewportBottom;
+      }
+
+      const overlap = Math.max(
+        0,
+        viewportBaselineRef.current - currentViewportBottom
+      );
+      const nextKeyboardOpen = overlap > KEYBOARD_THRESHOLD_PX;
+
+      if (!nextKeyboardOpen) {
+        viewportBaselineRef.current = currentViewportBottom;
+        setKeyboardInset(0);
+        setKeyboardOpen(false);
+        return;
+      }
+
+      setKeyboardInset(overlap);
+      setKeyboardOpen(true);
+    };
+
+    const handleViewportChange = () => {
+      syncKeyboardViewport();
+    };
+
+    const handleOrientationChange = () => {
+      syncKeyboardViewport(true);
+    };
+
+    syncKeyboardViewport(true);
+
+    viewport.addEventListener('resize', handleViewportChange);
+    viewport.addEventListener('scroll', handleViewportChange);
+    window.addEventListener('orientationchange', handleOrientationChange);
+
+    return () => {
+      viewport.removeEventListener('resize', handleViewportChange);
+      viewport.removeEventListener('scroll', handleViewportChange);
+      window.removeEventListener('orientationchange', handleOrientationChange);
+    };
+  }, []);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -442,7 +498,14 @@ export default function Chat() {
       </main>
 
       {/* Fixed Bottom Input */}
-      <div className="fixed bottom-0 left-0 right-0 bg-background/80 px-[max(0.75rem,env(safe-area-inset-left))] pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 backdrop-blur-sm sm:px-4 sm:pb-8 sm:pt-4">
+      <div
+        className={`fixed left-0 right-0 z-20 border-t border-border/40 bg-background px-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 shadow-[0_-16px_40px_rgba(0,0,0,0.38)] sm:px-4 sm:pt-4 ${
+          keyboardOpen
+            ? 'pb-3 sm:pb-4'
+            : 'pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] sm:pb-8'
+        }`}
+        style={{ bottom: `${keyboardInset}px` }}
+      >
         <div className="w-full max-w-3xl sm:mx-auto">
           {/* File Preview */}
           {selectedFile && (
@@ -468,7 +531,7 @@ export default function Chat() {
           )}
 
           <form onSubmit={handleSubmit}>
-            <div className="relative flex items-center gap-2 rounded-full border border-border/50 bg-muted/20 px-2.5 py-2 pl-3 transition-all hover:border-border/80 hover:bg-muted/30 focus-within:border-white/20 focus-within:bg-muted/30">
+            <div className="relative flex items-center gap-2 rounded-full border border-border/60 bg-card px-2.5 py-2 pl-3 transition-all hover:border-border/80 hover:bg-card focus-within:border-white/20 focus-within:bg-card">
               <label htmlFor="file-input" className="flex items-center justify-center cursor-pointer text-muted-foreground hover:text-foreground transition-colors">
                 <Plus className="h-4 w-4" />
               </label>
@@ -483,7 +546,7 @@ export default function Chat() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask a question..."
+                placeholder="Talk to Nicole..."
                 rows={1}
                 className="max-h-32 flex-1 resize-none bg-transparent py-2 text-[16px] leading-6 placeholder:text-muted-foreground focus:outline-none"
                 style={{ minHeight: '24px', fontSize: '16px' }}
