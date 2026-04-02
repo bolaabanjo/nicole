@@ -160,6 +160,19 @@ export const conversationSummaries = pgTable("conversation_summaries", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Tool invocations: audit trail for Nicole's tool system
+export const toolInvocations = pgTable("tool_invocations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  toolName: text("tool_name").notNull(),
+  status: text("status").notNull(), // 'success', 'error', 'skipped'
+  sideEffectLevel: text("side_effect_level").notNull(), // 'read' | 'write' | 'actuate'
+  requiresConfirmation: text("requires_confirmation").default("false"),
+  input: jsonb("input"),
+  output: jsonb("output"),
+  error: text("error"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Notes / writing drafts
 export const notes = pgTable("notes", {
   id: uuid("id").primaryKey().defaultRandom(),

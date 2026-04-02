@@ -10,18 +10,12 @@ import {
   extractAndStoreMemories,
   summarizeOldConversations,
 } from "@/lib/ai/memory";
-import { searchWeb, formatSearchResults } from "@/lib/search/web";
-import { deepResearch } from "@/lib/search/research";
+import {
+  formatToolResultsForPrompt,
+  runToolPlanningLoop,
+  shouldAttemptToolUse,
+} from "@/lib/ai/tools";
 import { loadRelevantSourceContext } from "@/lib/search/semantic";
-
-const SEARCH_INTENT_PROMPT = `Determine if this message requires a web search or deep research to answer properly. Return ONLY a JSON object:
-- If deep research needed (e.g. "look me up", "search me", "find out about me", "research [person]"): {"search": true, "deep": true, "query": "person's full name or search terms"}
-- If quick search needed: {"search": true, "deep": false, "query": "optimized search query"}
-- If no search needed: {"search": false}
-
-Deep research: when someone asks you to research a person thoroughly — read multiple pages and remember everything.
-Quick search: current events, recent news, "look up", "search for", "what's the latest", facts you're unsure about.
-Messages that don't need search: personal conversation, opinions, things from memory, study/source material questions, greetings.`;
 
 export async function POST(req: NextRequest) {
   try {
@@ -45,38 +39,6 @@ export async function POST(req: NextRequest) {
       loadRelevantSourceContext(message),
     ]);
 
-    // Check if Nicole needs to search the web
-    let searchContext = "";
-    try {
-      const intentResponse = await chat([
-        { role: "system", content: SEARCH_INTENT_PROMPT },
-        { role: "user", content: message },
-      ]);
-
-      const intentText =
-        typeof intentResponse === "string"
-          ? intentResponse
-          : String(intentResponse);
-      const cleaned = intentText
-        .replace(/```json?\n?/g, "")
-        .replace(/```/g, "")
-        .trim();
-      const intent = JSON.parse(cleaned);
-
-      if (intent.search && intent.query) {
-        if (intent.deep) {
-          // Deep research — read multiple pages, extract facts, store as memories
-          const result = await deepResearch(intent.query);
-          searchContext = `[Deep research complete: read ${result.pagesRead} pages, extracted ${result.factsExtracted} facts about "${intent.query}". The facts have been saved to your memory. Use them naturally in your response — tell the person what you found out about them.]`;
-        } else {
-          const results = await searchWeb(intent.query);
-          searchContext = formatSearchResults(results);
-        }
-      }
-    } catch {
-      // Search intent detection failed — not critical, continue without search
-    }
-
     const systemPrompt = buildSystemPrompt({
       conversationSummaries: summaryText || undefined,
       memories: memoryText || undefined,
@@ -85,8 +47,17 @@ export async function POST(req: NextRequest) {
 
     // Build full prompt with search results if any
     let fullSystemPrompt = systemPrompt;
-    if (searchContext) {
-      fullSystemPrompt += `\n\n## Web search results\nYou searched the web for the user's question. Use these results naturally — don't list them as bullet points, weave the information into your response. Cite sources briefly if relevant.\n\n${searchContext}`;
+    if (shouldAttemptToolUse(message)) {
+      const toolPlan = await runToolPlanningLoop({
+        systemPrompt,
+        recentMessages,
+        userMessage: message,
+      });
+      const toolContext = formatToolResultsForPrompt(toolPlan.toolResults);
+
+      if (toolContext) {
+        fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. Use these results naturally in the reply. Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
+      }
     }
 
     const fullMessages: ChatMessage[] = [

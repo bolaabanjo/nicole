@@ -107,6 +107,16 @@ type MemoryResolution =
       topic?: string | null;
     };
 
+export interface MemorySearchResult {
+  id?: string;
+  content: string;
+  category: string;
+  source: string | null;
+  topic: string | null;
+  importance?: number | null;
+  score?: number | null;
+}
+
 /**
  * Store a memory and generate an embedding when possible.
  */
@@ -249,6 +259,34 @@ export async function loadMemories(
   }
 }
 
+export async function searchRelevantMemories(
+  query: string,
+  limit = 8
+): Promise<MemorySearchResult[]> {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  try {
+    const mems = await loadRelevantMemories(trimmed, limit);
+
+    return mems.map((memory) => ({
+      id: "id" in memory ? memory.id : undefined,
+      content: memory.content,
+      category: memory.category,
+      source: memory.source ?? null,
+      topic: memory.topic ?? null,
+      importance: "importance" in memory ? memory.importance : null,
+      score:
+        "score" in memory && typeof memory.score === "number"
+          ? memory.score
+          : null,
+    }));
+  } catch (error) {
+    console.error("Memory search tool failed:", error);
+    return [];
+  }
+}
+
 /**
  * Load recent conversation summaries so Nicole keeps long-range context
  * without dragging the full transcript into every prompt.
@@ -384,10 +422,13 @@ async function loadRelevantMemories(query: string, limit: number) {
 
     const mems = await db
       .select({
+        id: memories.id,
         content: memories.content,
         category: memories.category,
         source: memories.source,
         topic: memories.topic,
+        importance: memories.importance,
+        score: distance,
       })
       .from(memories)
       .where(isNotNull(memories.embedding))
@@ -412,10 +453,12 @@ async function loadRelevantMemories(query: string, limit: number) {
 async function loadTopMemories(limit: number) {
   return db
     .select({
+      id: memories.id,
       content: memories.content,
       category: memories.category,
       source: memories.source,
       topic: memories.topic,
+      importance: memories.importance,
     })
     .from(memories)
     .orderBy(desc(memories.importance), desc(memories.createdAt))
