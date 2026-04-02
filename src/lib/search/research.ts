@@ -1,7 +1,6 @@
 import { searchWeb, fetchPageText } from "./web";
 import { chat } from "@/lib/ai/router";
-import { db } from "@/lib/db/client";
-import { memories } from "@/lib/db/schema";
+import { storeMemory } from "@/lib/ai/memory";
 
 const EXTRACT_PERSON_FACTS_PROMPT = `You are extracting facts about a specific person from a web page. Given the person's name/query and the page content, extract every relevant fact about them.
 
@@ -104,7 +103,7 @@ export async function deepResearch(
       if (Array.isArray(facts)) {
         for (const fact of facts) {
           if (fact.content && fact.category) {
-            await db.insert(memories).values({
+            await storeMemory({
               content: fact.content,
               category: fact.category,
               importance: fact.importance || 5,

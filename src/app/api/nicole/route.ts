@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
 
     // Load context in parallel
     const [memoryText, recentMessages, sourceContext] = await Promise.all([
-      loadMemories(),
+      loadMemories(message),
       loadRecentMessages(),
       loadRelevantSourceContext(message),
     ]);

@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
     await saveChatMessage("user", message);
 
     const [memoryText, recentMessages, sourceContext] = await Promise.all([
-      loadMemories(),
+      loadMemories(message),
       loadRecentMessages(),
       loadRelevantSourceContext(message),
     ]);

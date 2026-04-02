@@ -131,6 +131,7 @@ export const memories = pgTable("memories", {
   importance: integer("importance").default(5), // 1-10
   source: text("source").default("conversation"), // 'conversation', 'research', 'ingestion'
   topic: text("topic"), // what/who this memory is about — e.g. "Bola Banjo", "quantum computing"
+  embedding: vector("embedding", { dimensions: 768 }),
   lastReferencedAt: timestamp("last_referenced_at").defaultNow(),
   createdAt: timestamp("created_at").defaultNow(),
 });
