@@ -215,6 +215,17 @@ function isNearBottom(): boolean {
   return documentHeight - (scrollTop + viewportHeight) <= AUTO_SCROLL_THRESHOLD_PX;
 }
 
+function detectStandaloneMode(): boolean {
+  if (typeof window === 'undefined') return false;
+
+  const iosStandalone =
+    'standalone' in window.navigator &&
+    typeof window.navigator.standalone === 'boolean' &&
+    window.navigator.standalone;
+
+  return iosStandalone || window.matchMedia('(display-mode: standalone)').matches;
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -222,7 +233,11 @@ export default function Chat() {
   const [streaming, setStreaming] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [browserKeyboardInset, setBrowserKeyboardInset] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isSyncingRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
   const forceScrollOnNextUpdateRef = useRef(false);
@@ -294,6 +309,59 @@ export default function Chat() {
       window.removeEventListener('scroll', handleScroll);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const mediaQuery = window.matchMedia('(display-mode: standalone)');
+    const syncStandalone = () => {
+      setIsStandalone(detectStandaloneMode());
+    };
+
+    syncStandalone();
+    mediaQuery.addEventListener('change', syncStandalone);
+
+    return () => {
+      mediaQuery.removeEventListener('change', syncStandalone);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      typeof window === 'undefined' ||
+      !window.visualViewport ||
+      isStandalone
+    ) {
+      setBrowserKeyboardInset(0);
+      return;
+    }
+
+    const viewport = window.visualViewport;
+    const KEYBOARD_THRESHOLD_PX = 120;
+
+    const syncInset = () => {
+      if (!isComposerFocused) {
+        setBrowserKeyboardInset(0);
+        return;
+      }
+
+      const viewportBottom = viewport.height + viewport.offsetTop;
+      const overlap = Math.max(0, window.innerHeight - viewportBottom);
+
+      setBrowserKeyboardInset(
+        overlap > KEYBOARD_THRESHOLD_PX ? overlap : 0
+      );
+    };
+
+    syncInset();
+    viewport.addEventListener('resize', syncInset);
+    viewport.addEventListener('scroll', syncInset);
+
+    return () => {
+      viewport.removeEventListener('resize', syncInset);
+      viewport.removeEventListener('scroll', syncInset);
+    };
+  }, [isComposerFocused, isStandalone]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -508,7 +576,8 @@ export default function Chat() {
 
       {/* Fixed Bottom Input */}
       <div
-        className="fixed bottom-0 left-0 right-0 z-20 border-t border-border/40 bg-background px-[max(0.75rem,env(safe-area-inset-left))] pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 shadow-[0_-16px_40px_rgba(0,0,0,0.38)] sm:px-4 sm:pb-8 sm:pt-4"
+        className="fixed left-0 right-0 z-20 border-t border-border/40 bg-background px-[max(0.75rem,env(safe-area-inset-left))] pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 shadow-[0_-16px_40px_rgba(0,0,0,0.38)] sm:bottom-0 sm:px-4 sm:pb-8 sm:pt-4"
+        style={{ bottom: `${browserKeyboardInset}px` }}
       >
         <div className="w-full max-w-3xl sm:mx-auto">
           {/* File Preview */}
@@ -546,9 +615,15 @@ export default function Chat() {
                 onChange={handleFileChange}
               />
               <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onFocus={() => setIsComposerFocused(true)}
+                onBlur={() => {
+                  setIsComposerFocused(false);
+                  setBrowserKeyboardInset(0);
+                }}
                 placeholder="Talk to Nicole..."
                 rows={1}
                 className="max-h-32 flex-1 resize-none bg-transparent py-2 text-[16px] leading-6 placeholder:text-muted-foreground focus:outline-none"
