@@ -70,6 +70,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
     const copyCode = (code: string) => {
         navigator.clipboard.writeText(code);
     };
+    const safeContent = content.replace(/<\/?thought>/gi, "");
 
     return (
         <div className="max-w-none min-w-0 break-words text-sm text-foreground/90 leading-relaxed [overflow-wrap:anywhere] [&_a]:break-all [&_strong]:font-bold [&_em]:italic">
@@ -171,7 +172,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
                     ),
                 }}
             >
-                {content}
+                {safeContent}
             </ReactMarkdown>
         </div>
     );

@@ -27,37 +27,60 @@ interface ParsedAssistantContent {
 
 const HISTORY_POLL_INTERVAL_MS = 5000;
 const AUTO_SCROLL_THRESHOLD_PX = 160;
+const THOUGHT_OPEN_TAG = '<thought>';
+const THOUGHT_CLOSE_TAG = '</thought>';
+
+function stripThoughtTags(content: string): string {
+  return content.replace(/<\/?thought>/gi, '');
+}
 
 function parseAssistantContent(content: string): ParsedAssistantContent {
-  const leadingThoughtMatch = content.match(/^\s*<thought>/i);
+  let remaining = content;
+  const reasoningBlocks: string[] = [];
+  let reasoningStreaming = false;
 
-  if (!leadingThoughtMatch) {
-    return {
-      hasReasoning: false,
-      reasoningText: '',
-      responseText: content,
-      reasoningStreaming: false,
-    };
-  }
+  while (true) {
+    const leadingWhitespace = remaining.match(/^\s*/)?.[0] ?? '';
+    const openTagStart = leadingWhitespace.length;
+    const openTag = remaining
+      .slice(openTagStart, openTagStart + THOUGHT_OPEN_TAG.length)
+      .toLowerCase();
 
-  const thoughtOpenLength = leadingThoughtMatch[0].length;
-  const closeTag = '</thought>';
-  const closeIndex = content.toLowerCase().indexOf(closeTag, thoughtOpenLength);
+    if (openTag !== THOUGHT_OPEN_TAG) {
+      break;
+    }
 
-  if (closeIndex === -1) {
-    return {
-      hasReasoning: true,
-      reasoningText: content.slice(thoughtOpenLength).trim(),
-      responseText: '',
-      reasoningStreaming: true,
-    };
+    const thoughtStart = openTagStart + THOUGHT_OPEN_TAG.length;
+    const closeIndex = remaining
+      .toLowerCase()
+      .indexOf(THOUGHT_CLOSE_TAG, thoughtStart);
+
+    if (closeIndex === -1) {
+      const partialThought = stripThoughtTags(remaining.slice(thoughtStart)).trim();
+      if (partialThought) {
+        reasoningBlocks.push(partialThought);
+      }
+      remaining = '';
+      reasoningStreaming = true;
+      break;
+    }
+
+    const thoughtBlock = stripThoughtTags(
+      remaining.slice(thoughtStart, closeIndex)
+    ).trim();
+
+    if (thoughtBlock) {
+      reasoningBlocks.push(thoughtBlock);
+    }
+
+    remaining = remaining.slice(closeIndex + THOUGHT_CLOSE_TAG.length);
   }
 
   return {
-    hasReasoning: true,
-    reasoningText: content.slice(thoughtOpenLength, closeIndex).trim(),
-    responseText: content.slice(closeIndex + closeTag.length).trimStart(),
-    reasoningStreaming: false,
+    hasReasoning: reasoningBlocks.length > 0,
+    reasoningText: reasoningBlocks.join('\n\n'),
+    responseText: stripThoughtTags(remaining).trimStart(),
+    reasoningStreaming,
   };
 }
 
