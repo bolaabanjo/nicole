@@ -2,6 +2,12 @@ import SwiftUI
 
 struct MessageBubbleView: View {
     let message: NicoleMessage
+    @State private var isThoughtOpen: Bool
+
+    init(message: NicoleMessage) {
+      self.message = message
+      self._isThoughtOpen = State(initialValue: message.isThoughtOpen)
+    }
     
   var body: some View {
     HStack {
@@ -10,6 +16,16 @@ struct MessageBubbleView: View {
       }
 
       VStack(alignment: .leading, spacing: 8) {
+        if message.role == .assistant && (message.thoughtContent != nil || message.isStreaming) {
+            ThoughtView(
+                thought: message.thoughtContent ?? "",
+                duration: message.thoughtDuration,
+                isStreaming: message.isStreaming,
+                isOpen: $isThoughtOpen
+            )
+            .padding(.bottom, 4)
+        }
+
         if message.role == .user {
           // User message - white background, black text
           Text(message.content)
@@ -18,10 +34,12 @@ struct MessageBubbleView: View {
             .foregroundColor(.black)
         } else {
           // Assistant message - dark background, white text
-          Text(message.content.isEmpty && message.isStreaming ? "Nicole is thinking..." : message.content)
-            .textSelection(.enabled)
-            .font(.system(size: 15, weight: .regular))
-            .foregroundColor(.white.opacity(0.92))
+          if !message.content.isEmpty {
+            Text(message.content)
+              .textSelection(.enabled)
+              .font(.system(size: 15, weight: .regular))
+              .foregroundColor(.white.opacity(0.92))
+          }
         }
 
         // Streaming indicator for assistant
@@ -84,7 +102,7 @@ struct MessageBubbleView: View {
             }
           }
         )
-        .frame(maxWidth: 600, alignment: message.role == .user ? .trailing : .leading)
+        .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
 
       if message.role != .user {
         Spacer()
@@ -92,5 +110,6 @@ struct MessageBubbleView: View {
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 4)
+    .frame(maxWidth: 720)
   }
 }

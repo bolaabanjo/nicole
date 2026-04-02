@@ -8,6 +8,8 @@ struct ContentView: View {
 
   @State private var isShowingSettings = false
   @State private var selectedAttachment: ComposerAttachment?
+  @State private var workspacePreview: NicoleWorkspaceContextPayload?
+  @State private var isDropTargeted = false
 
   private let maxContentWidth: CGFloat = 760
 
@@ -47,7 +49,7 @@ struct ContentView: View {
       composer
     }
     .frame(
-      minWidth: 420,
+      minWidth: 560,
       idealWidth: settings.windowMode.idealWidth,
       minHeight: 680
     )
@@ -66,61 +68,104 @@ struct ContentView: View {
     }
     .task {
       await viewModel.loadHistory(baseURLString: settings.baseURLString)
+      refreshWorkspacePreview()
     }
     .onChange(of: settings.windowMode) { _, mode in
       OverlayWindowManager.shared.updatePreferredWidth(mode.idealWidth)
     }
+    .onChange(of: settings.includeClipboard) { _, _ in
+      refreshWorkspacePreview()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+      refreshWorkspacePreview()
+    }
   }
 
   private var header: some View {
-    HStack(alignment: .center, spacing: 14) {
-      VStack(alignment: .leading, spacing: 4) {
-        Text("Nicole")
-          .font(.system(size: 18, weight: .semibold))
-          .foregroundStyle(Color.white)
-
-        Text(primaryStatusLine)
-          .font(.system(size: 12, weight: .medium))
-          .foregroundStyle(statusColor)
-          .lineLimit(1)
-
-        Text(secondaryStatusLine)
-          .font(.system(size: 11, weight: .medium))
-          .foregroundStyle(Color.white.opacity(0.42))
-          .lineLimit(1)
-      }
-
+    HStack(spacing: 0) {
       Spacer()
+      HStack(alignment: .center, spacing: 0) {
+        VStack(alignment: .leading, spacing: 2) {
+          HStack(spacing: 8) {
+            Text("Nicole")
+              .font(.system(size: 16, weight: .bold))
+              .foregroundStyle(Color.white)
+            
+            Circle()
+              .fill(statusDotColor)
+              .frame(width: 6, height: 6)
+          }
 
-      Picker("Mode", selection: $settings.windowMode) {
-        ForEach(AppSettings.WindowMode.allCases) { mode in
-          Text(mode.title).tag(mode)
+          Text(primaryStatusLine)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.42))
+            .lineLimit(1)
+        }
+
+        Spacer()
+
+        HStack(spacing: 16) {
+          Picker("Mode", selection: $settings.windowMode) {
+            ForEach(AppSettings.WindowMode.allCases) { mode in
+              Text(mode.title).tag(mode)
+            }
+          }
+          .pickerStyle(.segmented)
+          .frame(width: 160)
+          .scaleEffect(0.9)
+
+          Button {
+            NSApp.keyWindow?.toggleFullScreen(nil)
+          } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+              .font(.system(size: 14, weight: .medium))
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(Color.white.opacity(0.58))
+          .help("Toggle Fullscreen")
+
+          Button {
+            Task {
+              await viewModel.loadHistory(baseURLString: settings.baseURLString)
+            }
+          } label: {
+            Image(systemName: "arrow.clockwise")
+              .font(.system(size: 14, weight: .medium))
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(Color.white.opacity(0.58))
+          .help("Refresh History")
+
+          Button {
+            isShowingSettings = true
+          } label: {
+            Image(systemName: "slider.horizontal.3")
+              .font(.system(size: 14, weight: .medium))
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(Color.white.opacity(0.58))
+          .help("Settings")
         }
       }
-      .pickerStyle(.segmented)
-      .frame(width: 190)
-
-      Button {
-        Task {
-          await viewModel.loadHistory(baseURLString: settings.baseURLString)
-        }
-      } label: {
-        Label("Refresh", systemImage: "arrow.clockwise")
-      }
-      .buttonStyle(.borderless)
-      .foregroundStyle(Color.white.opacity(0.8))
-
-      Button {
-        isShowingSettings = true
-      } label: {
-        Label("Settings", systemImage: "slider.horizontal.3")
-      }
-      .buttonStyle(.borderless)
-      .foregroundStyle(Color.white.opacity(0.8))
+      .frame(maxWidth: maxContentWidth)
+      .padding(.horizontal, 20)
+      Spacer()
     }
-    .padding(.horizontal, 20)
-    .padding(.vertical, 16)
-    .background(Color(red: 0.06, green: 0.06, blue: 0.07))
+    .padding(.vertical, 14)
+    .background(Color.black)
+  }
+
+  private var statusDotColor: Color {
+    switch viewModel.connectionState {
+    case .connected:
+      return .green
+    case .connecting, .syncing:
+      return .orange
+    case .failed:
+      return .red
+    case .idle:
+      return .white.opacity(0.24)
+    }
   }
 
   private var emptyState: some View {
@@ -140,6 +185,11 @@ struct ContentView: View {
   private var composer: some View {
     VStack(spacing: 0) {
       VStack(spacing: 12) {
+        if let workspacePreview, workspacePreview.hasMeaningfulWorkspaceContext {
+          contextPreview(workspacePreview)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+
         if let selectedAttachment {
           HStack {
             attachmentPreview(selectedAttachment)
@@ -208,6 +258,17 @@ struct ContentView: View {
       .padding(.bottom, 12)
       .frame(maxWidth: .infinity)
       .background(Color.black)
+      .overlay {
+        if isDropTargeted {
+          RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .stroke(Color.white.opacity(0.22), style: StrokeStyle(lineWidth: 1.5, dash: [8, 8]))
+            .padding(.horizontal, 26)
+            .padding(.vertical, 18)
+        }
+      }
+      .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
+        handleDroppedFile(providers: providers)
+      }
     }
   }
 }
@@ -283,6 +344,10 @@ private extension ContentView {
       return errorText
     }
 
+    if let infoText = viewModel.infoText {
+      return infoText
+    }
+
     switch viewModel.connectionState {
     case .idle:
       return "Set the canonical Nicole server once and this app will keep using it."
@@ -329,14 +394,27 @@ private extension ContentView {
   }
 
   var isSendDisabled: Bool {
-    viewModel.isSending || viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    viewModel.isSending || (
+      viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+      selectedAttachment == nil
+    )
   }
 
   func submitCurrentMessage() {
     guard !isSendDisabled else { return }
 
     Task {
-      await viewModel.send(baseURLString: settings.baseURLString, settings: settings)
+      let didComplete = await viewModel.send(
+        baseURLString: settings.baseURLString,
+        settings: settings,
+        attachmentURL: selectedAttachment?.url
+      )
+
+      if didComplete {
+        withAnimation(.easeOut(duration: 0.16)) {
+          selectedAttachment = nil
+        }
+      }
     }
   }
 
@@ -396,6 +474,80 @@ private extension ContentView {
         selectedAttachment = ComposerAttachment(url: url)
       }
     }
+  }
+
+  func handleDroppedFile(providers: [NSItemProvider]) -> Bool {
+    guard
+      let provider = providers.first(where: {
+        $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+      })
+    else {
+      return false
+    }
+
+    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+      var resolvedURL: URL?
+
+      if let data = item as? Data {
+        resolvedURL = URL(dataRepresentation: data, relativeTo: nil)
+      } else if let url = item as? URL {
+        resolvedURL = url
+      }
+
+      guard let resolvedURL else { return }
+
+      DispatchQueue.main.async {
+        withAnimation(.easeOut(duration: 0.18)) {
+          selectedAttachment = ComposerAttachment(url: resolvedURL)
+        }
+      }
+    }
+
+    return true
+  }
+
+  @ViewBuilder
+  func contextPreview(_ context: NicoleWorkspaceContextPayload) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 8) {
+        Image(systemName: "scope")
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(Color.white.opacity(0.46))
+
+        Text(context.summaryTitle)
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(Color.white.opacity(0.78))
+
+        if let detail = context.summaryDetail {
+          Text(detail)
+            .font(.system(size: 12, weight: .regular))
+            .foregroundStyle(Color.white.opacity(0.44))
+            .lineLimit(1)
+        }
+      }
+
+      if let preview = context.selectedTextPreview {
+        Text(preview)
+          .font(.system(size: 11, weight: .regular))
+          .foregroundStyle(Color.white.opacity(0.42))
+          .lineLimit(2)
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 18, style: .continuous)
+        .fill(Color.white.opacity(0.04))
+        .overlay(
+          RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    )
+  }
+
+  func refreshWorkspacePreview() {
+    workspacePreview = WorkspaceContextProvider.previewContext(settings: settings)
   }
 }
 

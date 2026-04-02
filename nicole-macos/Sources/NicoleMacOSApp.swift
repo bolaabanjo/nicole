@@ -11,7 +11,7 @@ struct NicoleMacOSApp: App {
       ContentView(settings: settings, viewModel: viewModel)
     }
     .defaultSize(width: settings.windowMode.idealWidth, height: 760)
-    .windowResizability(.contentSize)
+    .windowResizability(.contentMinSize)
     .commands {
       CommandMenu("Nicole") {
         Button("Toggle Nicole") {

@@ -4,26 +4,32 @@ struct WindowAccessor: NSViewRepresentable {
   let onResolve: @MainActor (NSWindow) -> Void
 
   func makeNSView(context: Context) -> NSView {
-    let view = NSView()
-
-    DispatchQueue.main.async {
-      if let window = view.window {
-        Task { @MainActor in
-          onResolve(window)
-        }
-      }
-    }
-
+    let view = ResolverView()
+    view.onResolve = onResolve
     return view
   }
 
   func updateNSView(_ nsView: NSView, context: Context) {
-    DispatchQueue.main.async {
-      if let window = nsView.window {
-        Task { @MainActor in
-          onResolve(window)
-        }
+    guard let resolverView = nsView as? ResolverView else { return }
+    resolverView.onResolve = onResolve
+
+    if let window = resolverView.window {
+      Task { @MainActor in
+        onResolve(window)
       }
+    }
+  }
+}
+
+private final class ResolverView: NSView {
+  var onResolve: (@MainActor (NSWindow) -> Void)?
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+
+    guard let window, let onResolve else { return }
+    Task { @MainActor in
+      onResolve(window)
     }
   }
 }

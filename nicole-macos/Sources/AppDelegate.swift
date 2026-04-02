@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @MainActor
   func toggleNicolePanel() {
+    WorkspaceContextProvider.captureExternalContext()
     OverlayWindowManager.shared.togglePanel()
   }
 

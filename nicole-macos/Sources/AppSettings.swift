@@ -20,9 +20,9 @@ final class AppSettings: ObservableObject {
     var idealWidth: Double {
       switch self {
       case .compact:
-        return 440
+        return 620
       case .expanded:
-        return 760
+        return 960
       }
     }
   }

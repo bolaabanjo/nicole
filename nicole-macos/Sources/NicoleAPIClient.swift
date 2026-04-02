@@ -62,6 +62,14 @@ actor NicoleAPIClient {
     ).url?.absoluteString ?? ""
   }
 
+  func ingestURLString(baseURLString: String) throws -> String {
+    try makeRequest(
+      baseURLString: baseURLString,
+      path: "/api/ingest",
+      method: "POST"
+    ).url?.absoluteString ?? ""
+  }
+
   func streamReply(
     baseURLString: String,
     message: String,
@@ -97,6 +105,74 @@ actor NicoleAPIClient {
     }
   }
 
+  func ingestFile(baseURLString: String, fileURL: URL) async throws -> NicoleIngestResult {
+    let fileExtension = fileURL.pathExtension.lowercased()
+    let title = fileURL.deletingPathExtension().lastPathComponent
+
+    switch fileExtension {
+    case "pdf":
+      let fileData = try Data(contentsOf: fileURL)
+      let multipart = makeMultipartBody(
+        fields: [
+          ("type", "pdf"),
+          ("title", title),
+        ],
+        fileField: (
+          name: "file",
+          filename: fileURL.lastPathComponent,
+          mimeType: "application/pdf",
+          data: fileData
+        )
+      )
+
+      var request = try makeRequest(
+        baseURLString: baseURLString,
+        path: "/api/ingest",
+        method: "POST"
+      )
+      request.setValue(
+        "multipart/form-data; boundary=\(multipart.boundary)",
+        forHTTPHeaderField: "Content-Type"
+      )
+      request.httpBody = multipart.data
+
+      let (data, response) = try await session.data(for: request)
+      try validate(response: response, data: data, requestURL: request.url?.absoluteString)
+      return try JSONDecoder().decode(NicoleIngestResult.self, from: data)
+
+    case "txt", "md", "markdown":
+      let content = try String(contentsOf: fileURL, encoding: .utf8)
+      let multipart = makeMultipartBody(
+        fields: [
+          ("type", "note"),
+          ("title", title),
+          ("content", content),
+        ]
+      )
+
+      var request = try makeRequest(
+        baseURLString: baseURLString,
+        path: "/api/ingest",
+        method: "POST"
+      )
+      request.setValue(
+        "multipart/form-data; boundary=\(multipart.boundary)",
+        forHTTPHeaderField: "Content-Type"
+      )
+      request.httpBody = multipart.data
+
+      let (data, response) = try await session.data(for: request)
+      try validate(response: response, data: data, requestURL: request.url?.absoluteString)
+      return try JSONDecoder().decode(NicoleIngestResult.self, from: data)
+
+    default:
+      throw NicoleAPIError.server(
+        "Unsupported file type. Right now Nicole can ingest PDF, TXT, and Markdown files from the Mac app.",
+        url: try? ingestURLString(baseURLString: baseURLString)
+      )
+    }
+  }
+
   private func makeJSONRequest<Body: Encodable>(
     baseURLString: String,
     path: String,
@@ -110,6 +186,34 @@ actor NicoleAPIClient {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONEncoder().encode(body)
     return request
+  }
+
+  private func makeMultipartBody(
+    fields: [(String, String)],
+    fileField: (name: String, filename: String, mimeType: String, data: Data)? = nil
+  ) -> (boundary: String, data: Data) {
+    let boundary = "Boundary-\(UUID().uuidString)"
+    var body = Data()
+
+    for (name, value) in fields {
+      body.append("--\(boundary)\r\n".data(using: .utf8)!)
+      body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+      body.append("\(value)\r\n".data(using: .utf8)!)
+    }
+
+    if let fileField {
+      body.append("--\(boundary)\r\n".data(using: .utf8)!)
+      body.append(
+        "Content-Disposition: form-data; name=\"\(fileField.name)\"; filename=\"\(fileField.filename)\"\r\n"
+          .data(using: .utf8)!
+      )
+      body.append("Content-Type: \(fileField.mimeType)\r\n\r\n".data(using: .utf8)!)
+      body.append(fileField.data)
+      body.append("\r\n".data(using: .utf8)!)
+    }
+
+    body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+    return (boundary, body)
   }
 
   private func makeRequest(
