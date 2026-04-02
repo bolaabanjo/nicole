@@ -13,13 +13,29 @@ export async function chat(
   options: ChatOptions = {}
 ): Promise<string | ReadableStream> {
   if (options.stream) {
-    const stream = await cencori.ai.chatStream({
+    const stream = cencori.ai.chatStream({
       model: CHAT_MODEL,
       messages,
       temperature: options.temperature,
       maxTokens: options.maxTokens,
     });
-    return stream as unknown as ReadableStream;
+
+    const encoder = new TextEncoder();
+
+    return new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of stream as AsyncIterable<{ delta?: string }>) {
+            if (chunk?.delta) {
+              controller.enqueue(encoder.encode(chunk.delta));
+            }
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
   }
 
   const response = await cencori.ai.chat({

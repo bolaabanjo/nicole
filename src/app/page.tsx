@@ -41,6 +41,7 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -84,19 +85,30 @@ export default function Chat() {
       inputRef.current.style.height = "auto";
     }
 
+    const assistantId = `${Date.now()}-assistant`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
     try {
-      const res = await fetch("/api/nicole", {
+      const res = await fetch("/api/nicole/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userMsg.content }),
       });
 
-      const data = await res.json();
-
       if (!res.ok) {
+        const data = await res.json();
         setMessages((prev) => [
-          ...prev,
+          ...prev.filter((msg) => msg.id !== assistantId),
           {
+            id: assistantId,
             role: "assistant",
             content: data.error || "Something went wrong.",
             createdAt: new Date().toISOString(),
@@ -105,25 +117,40 @@ export default function Chat() {
         return;
       }
 
-      const content =
-        typeof data.content === "string"
-          ? data.content
-          : data.content?.toString() || "...";
+      setStreaming(true);
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let streamedContent = "";
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content, createdAt: new Date().toISOString() },
-      ]);
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          streamedContent += decoder.decode(value, { stream: true });
+
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantId
+                ? { ...msg, content: streamedContent }
+                : msg
+            )
+          );
+        }
+      }
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "I'm offline right now.",
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? {
+                ...msg,
+                content: "I'm offline right now.",
+              }
+            : msg
+        )
+      );
     } finally {
+      setStreaming(false);
       setSending(false);
       inputRef.current?.focus();
     }
@@ -174,6 +201,9 @@ export default function Chat() {
                       nicole
                     </div>
                     <Markdown content={msg.content} />
+                    {streaming && msg.id && i === messages.length - 1 && (
+                      <span className="inline-block w-1.5 h-4 bg-[var(--muted)] animate-pulse ml-0.5" />
+                    )}
                   </div>
                 ) : (
                   <div className="flex justify-end">
