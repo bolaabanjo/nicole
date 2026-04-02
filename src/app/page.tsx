@@ -29,9 +29,44 @@ const HISTORY_POLL_INTERVAL_MS = 5000;
 const AUTO_SCROLL_THRESHOLD_PX = 160;
 const THOUGHT_OPEN_TAG = '<thought>';
 const THOUGHT_CLOSE_TAG = '</thought>';
+const IMPLICIT_REASONING_START =
+  /^(the user (wants|asked|is asking)|i need to|i should|i will|let me|my plan is|to answer this)/i;
+const LIST_PARAGRAPH = /^\s*(?:[-*]|\d+[.)])\s+/;
 
 function stripThoughtTags(content: string): string {
   return content.replace(/<\/?thought>/gi, '');
+}
+
+function extractImplicitReasoning(content: string): {
+  reasoningText: string;
+  responseText: string;
+} | null {
+  const paragraphs = content
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+
+  if (paragraphs.length < 2) {
+    return null;
+  }
+
+  if (!IMPLICIT_REASONING_START.test(paragraphs[0])) {
+    return null;
+  }
+
+  let cutoff = 1;
+  while (cutoff < paragraphs.length && LIST_PARAGRAPH.test(paragraphs[cutoff])) {
+    cutoff += 1;
+  }
+
+  if (cutoff >= paragraphs.length) {
+    return null;
+  }
+
+  return {
+    reasoningText: paragraphs.slice(0, cutoff).join('\n\n'),
+    responseText: paragraphs.slice(cutoff).join('\n\n').trimStart(),
+  };
 }
 
 function parseAssistantContent(content: string): ParsedAssistantContent {
@@ -76,10 +111,24 @@ function parseAssistantContent(content: string): ParsedAssistantContent {
     remaining = remaining.slice(closeIndex + THOUGHT_CLOSE_TAG.length);
   }
 
+  const cleanResponse = stripThoughtTags(remaining).trimStart();
+
+  if (reasoningBlocks.length === 0 && cleanResponse) {
+    const implicitReasoning = extractImplicitReasoning(cleanResponse);
+    if (implicitReasoning) {
+      return {
+        hasReasoning: true,
+        reasoningText: implicitReasoning.reasoningText,
+        responseText: implicitReasoning.responseText,
+        reasoningStreaming: false,
+      };
+    }
+  }
+
   return {
     hasReasoning: reasoningBlocks.length > 0,
     reasoningText: reasoningBlocks.join('\n\n'),
-    responseText: stripThoughtTags(remaining).trimStart(),
+    responseText: cleanResponse,
     reasoningStreaming,
   };
 }
