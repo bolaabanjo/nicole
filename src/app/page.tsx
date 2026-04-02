@@ -215,18 +215,6 @@ function isNearBottom(): boolean {
   return documentHeight - (scrollTop + viewportHeight) <= AUTO_SCROLL_THRESHOLD_PX;
 }
 
-function detectStandaloneMode(): boolean {
-  if (typeof window === 'undefined') return false;
-
-  const iosStandalone =
-    'standalone' in window.navigator &&
-    typeof window.navigator.standalone === 'boolean' &&
-    window.navigator.standalone;
-  const mediaStandalone = window.matchMedia('(display-mode: standalone)').matches;
-
-  return iosStandalone || mediaStandalone;
-}
-
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -234,15 +222,10 @@ export default function Chat() {
   const [streaming, setStreaming] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [isStandalone, setIsStandalone] = useState(false);
-  const [keyboardInset, setKeyboardInset] = useState(0);
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isSyncingRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
   const forceScrollOnNextUpdateRef = useRef(false);
-  const viewportBaselineRef = useRef(0);
 
   const syncHistory = async (force = false) => {
     if (isSyncingRef.current) return;
@@ -299,28 +282,6 @@ export default function Chat() {
     forceScrollOnNextUpdateRef.current = false;
   }, [messages]);
 
-  // Focus input when loaded
-  useEffect(() => {
-    if (loaded) textareaRef.current?.focus();
-  }, [loaded]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const mediaQuery = window.matchMedia('(display-mode: standalone)');
-
-    const syncStandaloneMode = () => {
-      setIsStandalone(detectStandaloneMode());
-    };
-
-    syncStandaloneMode();
-    mediaQuery.addEventListener('change', syncStandaloneMode);
-
-    return () => {
-      mediaQuery.removeEventListener('change', syncStandaloneMode);
-    };
-  }, []);
-
   useEffect(() => {
     const handleScroll = () => {
       shouldStickToBottomRef.current = isNearBottom();
@@ -360,59 +321,6 @@ export default function Chat() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [loaded, sending, streaming]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.visualViewport) {
-      return;
-    }
-
-    const viewport = window.visualViewport;
-    const KEYBOARD_THRESHOLD_PX = 120;
-
-    const syncKeyboardViewport = (resetBaseline = false) => {
-      const currentViewportBottom = viewport.height + viewport.offsetTop;
-
-      if (resetBaseline || viewportBaselineRef.current === 0) {
-        viewportBaselineRef.current = currentViewportBottom;
-      }
-
-      const overlap = Math.max(
-        0,
-        viewportBaselineRef.current - currentViewportBottom
-      );
-      const nextKeyboardOpen = overlap > KEYBOARD_THRESHOLD_PX;
-
-      if (!nextKeyboardOpen) {
-        viewportBaselineRef.current = currentViewportBottom;
-        setKeyboardInset(0);
-        setKeyboardOpen(false);
-        return;
-      }
-
-      setKeyboardInset(isStandalone ? 0 : overlap);
-      setKeyboardOpen(true);
-    };
-
-    const handleViewportChange = () => {
-      syncKeyboardViewport();
-    };
-
-    const handleOrientationChange = () => {
-      syncKeyboardViewport(true);
-    };
-
-    syncKeyboardViewport(true);
-
-    viewport.addEventListener('resize', handleViewportChange);
-    viewport.addEventListener('scroll', handleViewportChange);
-    window.addEventListener('orientationchange', handleOrientationChange);
-
-    return () => {
-      viewport.removeEventListener('resize', handleViewportChange);
-      viewport.removeEventListener('scroll', handleViewportChange);
-      window.removeEventListener('orientationchange', handleOrientationChange);
-    };
-  }, [isStandalone]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -521,7 +429,6 @@ export default function Chat() {
     } finally {
       setStreaming(false);
       setSending(false);
-      textareaRef.current?.focus();
       forceScrollOnNextUpdateRef.current = true;
       shouldStickToBottomRef.current = true;
       void syncHistory(true);
@@ -601,12 +508,7 @@ export default function Chat() {
 
       {/* Fixed Bottom Input */}
       <div
-        className={`fixed left-0 right-0 z-20 border-t border-border/40 bg-background px-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 shadow-[0_-16px_40px_rgba(0,0,0,0.38)] sm:px-4 sm:pt-4 ${
-          keyboardOpen
-            ? 'pb-3 sm:pb-4'
-            : 'pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] sm:pb-8'
-        }`}
-        style={{ bottom: isStandalone ? 0 : `${keyboardInset}px` }}
+        className="fixed bottom-0 left-0 right-0 z-20 border-t border-border/40 bg-background px-[max(0.75rem,env(safe-area-inset-left))] pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 shadow-[0_-16px_40px_rgba(0,0,0,0.38)] sm:px-4 sm:pb-8 sm:pt-4"
       >
         <div className="w-full max-w-3xl sm:mx-auto">
           {/* File Preview */}
@@ -644,7 +546,6 @@ export default function Chat() {
                 onChange={handleFileChange}
               />
               <textarea
-                ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
