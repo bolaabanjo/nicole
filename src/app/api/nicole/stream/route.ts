@@ -19,7 +19,7 @@ const SEARCH_INTENT_PROMPT = `Determine if this message requires a web search or
 - If quick search needed: {"search": true, "deep": false, "query": "optimized search query"}
 - If no search needed: {"search": false}
 
-Deep research: when someone asks you to research a person thoroughly — read multiple pages and remember everything.
+Deep research: when someone asks you to research a person thoroughly - read multiple pages and remember everything.
 Quick search: current events, recent news, "look up", "search for", "what's the latest", facts you're unsure about.
 Messages that don't need search: personal conversation, opinions, things from memory, study/source material questions, greetings.`;
 
@@ -43,6 +43,7 @@ export async function POST(req: NextRequest) {
     ]);
 
     let searchContext = "";
+
     try {
       const intentResponse = await chat([
         { role: "system", content: SEARCH_INTENT_PROMPT },
@@ -62,14 +63,14 @@ export async function POST(req: NextRequest) {
       if (intent.search && intent.query) {
         if (intent.deep) {
           const result = await deepResearch(intent.query);
-          searchContext = `[Deep research complete: read ${result.pagesRead} pages, extracted ${result.factsExtracted} facts about "${intent.query}". The facts have been saved to your memory. Use them naturally in your response — tell the person what you found out about them.]`;
+          searchContext = `[Deep research complete: read ${result.pagesRead} pages, extracted ${result.factsExtracted} facts about "${intent.query}". The facts have been saved to your memory. Use them naturally in your response - tell the person what you found out about them.]`;
         } else {
           const results = await searchWeb(intent.query);
           searchContext = formatSearchResults(results);
         }
       }
     } catch {
-      // Search intent detection failed — not critical, continue without search
+      // Search intent detection is optional.
     }
 
     const systemPrompt = buildSystemPrompt({
@@ -79,12 +80,13 @@ export async function POST(req: NextRequest) {
 
     let fullSystemPrompt = systemPrompt;
     if (searchContext) {
-      fullSystemPrompt += `\n\n## Web search results\nYou searched the web for the user's question. Use these results naturally — don't list them as bullet points, weave the information into your response. Cite sources briefly if relevant.\n\n${searchContext}`;
+      fullSystemPrompt += `\n\n## Web search results\nYou searched the web for the user's question. Use these results naturally - don't list them as bullet points, weave the information into your response. Cite sources briefly if relevant.\n\n${searchContext}`;
     }
 
     const fullMessages: ChatMessage[] = [
       { role: "system", content: fullSystemPrompt },
       ...recentMessages,
+      { role: "user", content: message },
     ];
 
     const stream = await chat(fullMessages, { stream: true });
@@ -115,20 +117,21 @@ export async function POST(req: NextRequest) {
             controller.enqueue(encoder.encode(chunk));
           }
         } catch (error) {
-          controller.error(error);
-          return;
+          console.error("Nicole stream error:", error);
         } finally {
+          controller.close();
+
           if (fullContent) {
             await saveChatMessage("assistant", fullContent);
+
             const lastExchange: ChatMessage[] = [
               { role: "user", content: message },
               { role: "assistant", content: fullContent },
             ];
+
             extractAndStoreMemories(lastExchange).catch(() => {});
           }
         }
-
-        controller.close();
       },
     });
 
@@ -136,10 +139,11 @@ export async function POST(req: NextRequest) {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache",
+        Connection: "keep-alive",
       },
     });
   } catch (error) {
-    console.error("Nicole stream error:", error);
+    console.error("Nicole error:", error);
     return NextResponse.json(
       {
         error:
@@ -164,9 +168,12 @@ async function loadSourceContext(): Promise<string> {
 
     if (recentChunks.length > 0) {
       return recentChunks
-        .map((c) => `[${c.title || "Unknown"}]\n${c.content}`)
+        .map((chunk) => `[${chunk.title || "Unknown"}]\n${chunk.content}`)
         .join("\n\n---\n\n");
     }
-  } catch {}
+  } catch {
+    return "";
+  }
+
   return "";
 }

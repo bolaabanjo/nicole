@@ -13,29 +13,18 @@ export async function chat(
   options: ChatOptions = {}
 ): Promise<string | ReadableStream> {
   if (options.stream) {
-    const stream = cencori.ai.chatStream({
+    const stream = await cencori.ai.chatStream({
       model: CHAT_MODEL,
       messages,
       temperature: options.temperature,
       maxTokens: options.maxTokens,
     });
 
-    const encoder = new TextEncoder();
+    if (isReadableStream(stream)) {
+      return stream;
+    }
 
-    return new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const chunk of stream as AsyncIterable<{ delta?: string }>) {
-            if (chunk?.delta) {
-              controller.enqueue(encoder.encode(chunk.delta));
-            }
-          }
-          controller.close();
-        } catch (error) {
-          controller.error(error);
-        }
-      },
-    });
+    return asyncIterableToReadableStream(stream);
   }
 
   const response = await cencori.ai.chat({
@@ -54,6 +43,88 @@ export async function chat(
 
   console.log("Cencori chat response shape:", JSON.stringify(r, null, 2));
   return String(r);
+}
+
+function isReadableStream(value: unknown): value is ReadableStream {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as ReadableStream).getReader === "function"
+  );
+}
+
+function asyncIterableToReadableStream(stream: unknown): ReadableStream {
+  const iterable =
+    stream && typeof stream === "object"
+      ? (stream as AsyncIterable<unknown>)
+      : null;
+
+  if (!iterable || typeof iterable[Symbol.asyncIterator] !== "function") {
+    throw new Error("Cencori stream response is not readable");
+  }
+
+  const encoder = new TextEncoder();
+
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        for await (const chunk of iterable) {
+          const text = extractStreamText(chunk);
+          if (text) {
+            controller.enqueue(encoder.encode(text));
+          }
+        }
+      } catch (error) {
+        controller.error(error);
+        return;
+      }
+
+      controller.close();
+    },
+  });
+}
+
+function extractStreamText(chunk: unknown): string {
+  if (typeof chunk === "string") {
+    return chunk;
+  }
+
+  if (!chunk || typeof chunk !== "object") {
+    return "";
+  }
+
+  const candidate = chunk as {
+    delta?: string;
+    content?: string;
+    text?: string;
+    choices?: Array<{
+      delta?: { content?: string };
+      text?: string;
+    }>;
+  };
+
+  if (typeof candidate.delta === "string") {
+    return candidate.delta;
+  }
+
+  if (typeof candidate.content === "string") {
+    return candidate.content;
+  }
+
+  if (typeof candidate.text === "string") {
+    return candidate.text;
+  }
+
+  const choice = candidate.choices?.[0];
+  if (typeof choice?.delta?.content === "string") {
+    return choice.delta.content;
+  }
+
+  if (typeof choice?.text === "string") {
+    return choice.text;
+  }
+
+  return "";
 }
 
 /**

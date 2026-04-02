@@ -1,265 +1,378 @@
-"use client";
+'use client';
 
-import { useState, useRef, useEffect } from "react";
-import { ArrowRightIcon } from "@heroicons/react/24/solid";
-import { Markdown } from "@/components/Markdown";
+import { useState, useRef, useEffect } from 'react';
+import { ArrowUp, Plus } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
+import { MessageActions } from '@/components/chat/MessageActions';
+import {
+  Reasoning,
+  ReasoningContent,
+  ReasoningTrigger,
+} from '@/components/ai-elements/reasoning';
 
 interface ChatMsg {
-  id?: string;
-  role: "user" | "assistant";
+  id: string;
+  role: 'user' | 'assistant';
   content: string;
   createdAt?: string;
 }
 
-function formatDateLabel(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const msgDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const diffDays = Math.floor(
-    (today.getTime() - msgDate.getTime()) / (1000 * 60 * 60 * 24)
-  );
+interface ParsedAssistantContent {
+  hasReasoning: boolean;
+  reasoningText: string;
+  responseText: string;
+  reasoningStreaming: boolean;
+}
 
-  if (diffDays === 0) return "Today";
-  if (diffDays === 1) return "Yesterday";
-  if (diffDays < 7) {
-    return date.toLocaleDateString("en-US", { weekday: "long" });
+function parseAssistantContent(content: string): ParsedAssistantContent {
+  const leadingThoughtMatch = content.match(/^\s*<thought>/i);
+
+  if (!leadingThoughtMatch) {
+    return {
+      hasReasoning: false,
+      reasoningText: '',
+      responseText: content,
+      reasoningStreaming: false,
+    };
   }
-  return date.toLocaleDateString("en-US", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
+
+  const thoughtOpenLength = leadingThoughtMatch[0].length;
+  const closeTag = '</thought>';
+  const closeIndex = content.toLowerCase().indexOf(closeTag, thoughtOpenLength);
+
+  if (closeIndex === -1) {
+    return {
+      hasReasoning: true,
+      reasoningText: content.slice(thoughtOpenLength).trim(),
+      responseText: '',
+      reasoningStreaming: true,
+    };
+  }
+
+  return {
+    hasReasoning: true,
+    reasoningText: content.slice(thoughtOpenLength, closeIndex).trim(),
+    responseText: content.slice(closeIndex + closeTag.length).trimStart(),
+    reasoningStreaming: false,
+  };
 }
 
-function getDateKey(dateStr: string): string {
-  const d = new Date(dateStr);
-  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-}
+const MessageParts = ({
+  message,
+  isLastMessage,
+  isLoading,
+}: {
+  message: ChatMsg;
+  isLastMessage: boolean;
+  isLoading: boolean;
+}) => {
+  const isStreamingThis = isLastMessage && isLoading && message.role === 'assistant';
+  const parsedContent = parseAssistantContent(message.content);
+  const showReasoning =
+    isStreamingThis || parsedContent.hasReasoning;
+  const visibleContent = parsedContent.responseText;
+  const reasoningIsStreaming = isStreamingThis || parsedContent.reasoningStreaming;
+  const reasoningText = parsedContent.reasoningText;
+
+  return (
+    <>
+      {showReasoning && (
+        <Reasoning className="w-full" isStreaming={reasoningIsStreaming}>
+          <ReasoningTrigger
+            getThinkingMessage={(streamingState, duration) =>
+              streamingState
+                ? `Nicole is thinking${duration != null && duration > 0 ? ` (${duration}s)` : ''}`
+                : `Thought${duration != null && duration > 0 ? ` for ${duration}s` : ''}`
+            }
+          />
+          {reasoningText && <ReasoningContent>{reasoningText}</ReasoningContent>}
+        </Reasoning>
+      )}
+
+      {visibleContent && (
+        <div className="max-w-none">
+          <MarkdownRenderer content={visibleContent} />
+        </div>
+      )}
+    </>
+  );
+};
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Load chat history on mount
   useEffect(() => {
-    fetch("/api/nicole/history")
+    fetch('/api/nicole/history')
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data)) {
-          setMessages(data);
+          setMessages(data.map((m: any) => ({ ...m, id: m.id || String(Math.random()) })));
         }
       })
       .catch(() => {})
       .finally(() => setLoaded(true));
   }, []);
 
-  // Auto-scroll on new messages
+  // Auto-scroll on-new messages
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   // Focus input when loaded
   useEffect(() => {
-    if (loaded) inputRef.current?.focus();
+    if (loaded) textareaRef.current?.focus();
   }, [loaded]);
 
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setSelectedFile(file);
+    }
+  };
+
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = (error) => reject(error);
+    });
+  };
+
   const sendMessage = async () => {
-    if (!input.trim() || sending) return;
+    if ((!input.trim() && !selectedFile) || sending) return;
 
     const userMsg: ChatMsg = {
-      role: "user",
+      id: String(Date.now() - 1),
+      role: 'user',
       content: input.trim(),
       createdAt: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, userMsg]);
-    setInput("");
+
+    const currentInput = input.trim();
+    const currentFile = selectedFile;
+    setInput('');
+    setSelectedFile(null);
     setSending(true);
 
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
-
-    const assistantId = `${Date.now()}-assistant`;
+    // Add placeholder for assistant's streaming response
+    const assistantMsgId = Date.now();
     setMessages((prev) => [
       ...prev,
-      {
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        createdAt: new Date().toISOString(),
-      },
+      { role: 'assistant', content: '', createdAt: new Date().toISOString(), id: String(assistantMsgId) },
     ]);
 
     try {
-      const res = await fetch("/api/nicole/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg.content }),
+      const body: { message: string; file?: { mediaType: string; data: string } } = {
+        message: currentInput,
+      };
+
+      if (currentFile) {
+        const base64Content = await fileToBase64(currentFile);
+        body.file = {
+          mediaType: currentFile.type,
+          data: base64Content,
+        };
+      }
+
+      const res = await fetch('/api/nicole/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
         const data = await res.json();
-        setMessages((prev) => [
-          ...prev.filter((msg) => msg.id !== assistantId),
-          {
-            id: assistantId,
-            role: "assistant",
-            content: data.error || "Something went wrong.",
-            createdAt: new Date().toISOString(),
-          },
-        ]);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === String(assistantMsgId)
+              ? { ...m, content: data.error || 'Something went wrong.' }
+              : m
+          )
+        );
         return;
       }
 
       setStreaming(true);
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
-      let streamedContent = "";
+      let streamedContent = '';
 
       if (reader) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          streamedContent += decoder.decode(value, { stream: true });
+          const chunk = decoder.decode(value, { stream: true });
+          streamedContent += chunk;
 
           setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantId
-                ? { ...msg, content: streamedContent }
-                : msg
+            prev.map((m) =>
+              m.id === String(assistantMsgId)
+                ? { ...m, content: streamedContent }
+                : m
             )
           );
         }
       }
     } catch {
       setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantId
-            ? {
-                ...msg,
-                content: "I'm offline right now.",
-              }
-            : msg
+        prev.map((m) =>
+          m.id === String(assistantMsgId)
+            ? { ...m, content: "I'm offline right now." }
+            : m
         )
       );
     } finally {
       setStreaming(false);
       setSending(false);
-      inputRef.current?.focus();
+      textareaRef.current?.focus();
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    sendMessage();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      handleSubmit(e as any);
     }
   };
 
-  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
-    const textarea = e.target;
-    textarea.style.height = "auto";
-    textarea.style.height = Math.min(textarea.scrollHeight, 160) + "px";
-  };
-
-  // Build messages with date separators
-  let lastDateKey = "";
+  const isAILoading = sending || streaming;
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Messages */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {/* Conversation */}
-        <div className="space-y-6 py-4">
-          {messages.map((msg, i) => {
-            const dateKey = msg.createdAt ? getDateKey(msg.createdAt) : "";
-            const showDateSep = dateKey && dateKey !== lastDateKey;
-            if (dateKey) lastDateKey = dateKey;
+    <div className="min-h-screen bg-background flex flex-col items-center">
+      {/* Chat Content */}
+      <main className="flex-1 w-full max-w-3xl mx-auto px-4 py-8 space-y-8 mt-14 pb-40">
+        <div className="space-y-6">
+          {messages.map((message, messageIndex) => {
+            const isLastMessage = messageIndex === messages.length - 1;
+            const isStreamingThis = isLastMessage && isAILoading && message.role === 'assistant';
+            const parsedContent =
+              message.role === 'assistant'
+                ? parseAssistantContent(message.content)
+                : null;
+            const visibleAssistantText = parsedContent?.responseText || '';
 
             return (
-              <div key={msg.id || i}>
-                {/* Date separator */}
-                {showDateSep && msg.createdAt && (
-                  <div className="flex justify-center py-4">
-                    <span className="text-xs text-[var(--muted)] font-mono opacity-50">
-                      {formatDateLabel(msg.createdAt)}
-                    </span>
-                  </div>
-                )}
-
-                {msg.role === "assistant" ? (
-                  <div>
-                    <div className="text-sm text-[var(--muted)] mb-1 font-mono">
-                      nicole
-                    </div>
-                    <Markdown content={msg.content} />
-                    {streaming && msg.id && i === messages.length - 1 && (
-                      <span className="inline-block w-1.5 h-4 bg-[var(--muted)] animate-pulse ml-0.5" />
-                    )}
+              <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
+                {message.role === 'user' ? (
+                  <div className="max-w-[85%] bg-primary text-primary-foreground rounded-2xl rounded-br-md px-3 py-2">
+                    <p className="text-sm">{message.content}</p>
                   </div>
                 ) : (
-                  <div className="flex justify-end">
-                    <div className="text-sm leading-relaxed text-[var(--muted)] max-w-[85%] whitespace-pre-wrap">
-                      {msg.content}
-                    </div>
+                  <div className="w-full max-w-none space-y-2">
+                    <MessageParts
+                      message={message}
+                      isLastMessage={isLastMessage}
+                      isLoading={isAILoading}
+                    />
+                    {!isStreamingThis && visibleAssistantText && (
+                      <MessageActions
+                        messageText={visibleAssistantText}
+                      />
+                    )}
                   </div>
                 )}
               </div>
             );
           })}
 
-          {/* Thinking indicator */}
-          {sending && messages[messages.length - 1]?.role === "user" && (
-            <div>
-              <div className="text-sm text-[var(--muted)] mb-1 font-mono">
-                nicole
-              </div>
-              <div className="flex gap-1">
-                <span className="w-1.5 h-1.5 bg-[var(--muted)] rounded-full animate-pulse" />
-                <span
-                  className="w-1.5 h-1.5 bg-[var(--muted)] rounded-full animate-pulse"
-                  style={{ animationDelay: "0.2s" }}
+          {/* Show reasoning when waiting for assistant message to appear */}
+          {isAILoading && (messages.length === 0 || messages[messages.length - 1].role === 'user') && (
+            <div className="flex flex-col items-start">
+              <Reasoning className="w-full" isStreaming={true}>
+                <ReasoningTrigger
+                  getThinkingMessage={(streamingState, duration) =>
+                    streamingState
+                      ? `Nicole is thinking${duration != null && duration > 0 ? ` (${duration}s)` : ''}`
+                      : `Thought${duration != null && duration > 0 ? ` for ${duration}s` : ''}`
+                  }
                 />
-                <span
-                  className="w-1.5 h-1.5 bg-[var(--muted)] rounded-full animate-pulse"
-                  style={{ animationDelay: "0.4s" }}
-                />
+              </Reasoning>
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
+      </main>
+
+      {/* Fixed Bottom Input */}
+      <div className="fixed bottom-0 left-0 right-0 p-4 bg-background/80 backdrop-blur-sm pb-8">
+        <div className="max-w-3xl mx-auto">
+          {/* File Preview */}
+          {selectedFile && (
+            <div className="flex items-center gap-2 mb-3 ml-4">
+              <div className="relative w-12 h-12 rounded-lg overflow-hidden flex items-center justify-center bg-muted">
+                {selectedFile.type.startsWith('image/') ? (
+                  <img
+                    src={URL.createObjectURL(selectedFile)}
+                    alt="Selected file preview"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <span className="text-[10px] text-muted-foreground">{selectedFile.type.split('/')[1] || 'File'}</span>
+                )}
+                <button
+                  onClick={() => setSelectedFile(null)}
+                  className="absolute -top-1 -right-1 bg-destructive text-white rounded-full w-4 h-4 text-[10px] flex items-center justify-center cursor-pointer"
+                >
+                  ×
+                </button>
               </div>
             </div>
           )}
-        </div>
 
-        <div ref={messagesEndRef} />
-      </div>
+          <form onSubmit={handleSubmit}>
+            <div className="relative flex items-center gap-2 rounded-full border border-border/50 bg-muted/20 px-2.5 pl-3 py-2 transition-all hover:bg-muted/30 hover:border-border/80 focus-within:border-white/20 focus-within:bg-muted/30">
+              <label htmlFor="file-input" className="flex items-center justify-center cursor-pointer text-muted-foreground hover:text-foreground transition-colors">
+                <Plus className="h-4 w-4" />
+              </label>
+              <input
+                id="file-input"
+                type="file"
+                className="hidden"
+                onChange={handleFileChange}
+              />
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask a question..."
+                rows={1}
+                className="flex-1 resize-none bg-transparent py-2 text-sm placeholder:text-muted-foreground focus:outline-none max-h-32"
+                style={{ minHeight: '24px' }}
+              />
+              <div className="flex-shrink-0">
+                <Button
+                  type="submit"
+                  size="icon"
+                  className="h-8 w-8 rounded-full bg-foreground text-background hover:bg-foreground/90 transition-all cursor-pointer"
+                  disabled={(!input.trim() && !selectedFile) || isAILoading}
+                >
+                  <ArrowUp className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </form>
 
-      {/* Input — fixed at bottom */}
-      <div className="flex-shrink-0 pb-4 pt-2">
-        <div className="relative">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={handleInput}
-            onKeyDown={handleKeyDown}
-            placeholder="Talk to Nicole..."
-            rows={1}
-            className="w-full bg-transparent border-b border-[var(--border)] px-1 py-3 text-sm outline-none focus:border-[var(--muted)] transition-colors resize-none overflow-hidden pr-12"
-            style={{ minHeight: "40px", fontSize: "16px" }}
-          />
-          <button
-            onClick={sendMessage}
-            disabled={sending || !input.trim()}
-            className="absolute right-0 bottom-2.5 p-1.5 text-[var(--muted)] hover:text-[var(--foreground)] transition-colors disabled:opacity-0"
-          >
-            <ArrowRightIcon className="w-4 h-4" />
-          </button>
+          <div className="text-center mt-3">
+          </div>
         </div>
       </div>
     </div>

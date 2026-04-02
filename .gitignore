@@ -6,3 +6,6 @@ uploads/*
 !uploads/.gitkeep
 *.tsbuildinfo
 next-env.d.ts
+.next-dev.log
+parseThoughtTest.js
+.next-dev.log
