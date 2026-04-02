@@ -166,6 +166,18 @@ function isNearBottom(): boolean {
   return documentHeight - (scrollTop + viewportHeight) <= AUTO_SCROLL_THRESHOLD_PX;
 }
 
+function detectStandaloneMode(): boolean {
+  if (typeof window === 'undefined') return false;
+
+  const iosStandalone =
+    'standalone' in window.navigator &&
+    typeof window.navigator.standalone === 'boolean' &&
+    window.navigator.standalone;
+  const mediaStandalone = window.matchMedia('(display-mode: standalone)').matches;
+
+  return iosStandalone || mediaStandalone;
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -173,6 +185,7 @@ export default function Chat() {
   const [streaming, setStreaming] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isStandalone, setIsStandalone] = useState(false);
   const [keyboardInset, setKeyboardInset] = useState(0);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -243,6 +256,23 @@ export default function Chat() {
   }, [loaded]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const mediaQuery = window.matchMedia('(display-mode: standalone)');
+
+    const syncStandaloneMode = () => {
+      setIsStandalone(detectStandaloneMode());
+    };
+
+    syncStandaloneMode();
+    mediaQuery.addEventListener('change', syncStandaloneMode);
+
+    return () => {
+      mediaQuery.removeEventListener('change', syncStandaloneMode);
+    };
+  }, []);
+
+  useEffect(() => {
     const handleScroll = () => {
       shouldStickToBottomRef.current = isNearBottom();
     };
@@ -310,7 +340,7 @@ export default function Chat() {
         return;
       }
 
-      setKeyboardInset(overlap);
+      setKeyboardInset(isStandalone ? 0 : overlap);
       setKeyboardOpen(true);
     };
 
@@ -333,7 +363,7 @@ export default function Chat() {
       viewport.removeEventListener('scroll', handleViewportChange);
       window.removeEventListener('orientationchange', handleOrientationChange);
     };
-  }, []);
+  }, [isStandalone]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -527,7 +557,7 @@ export default function Chat() {
             ? 'pb-3 sm:pb-4'
             : 'pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] sm:pb-8'
         }`}
-        style={{ bottom: `${keyboardInset}px` }}
+        style={{ bottom: isStandalone ? 0 : `${keyboardInset}px` }}
       >
         <div className="w-full max-w-3xl sm:mx-auto">
           {/* File Preview */}
