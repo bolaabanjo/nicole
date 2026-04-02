@@ -7,10 +7,11 @@ You do not need the App Store for this.
 ## What it does today
 
 - connects to your existing Nicole backend
+- stores a friendly name for your canonical Nicole server
 - loads shared chat history from `/api/nicole/history`
 - sends messages to `/api/nicole/stream`
 - renders streaming replies live
-- stores backend URL locally
+- stores Nicole server settings locally
 - supports a compact and expanded window mode
 
 ## Run it
@@ -20,11 +21,12 @@ You do not need the App Store for this.
 3. Choose the `NicoleMacOS` scheme.
 4. Run it.
 
-Default backend:
+Canonical server:
 
-- `http://127.0.0.1:3000`
+- set a friendly name like `Banjo`
+- set the server URL to your actual Nicole backend origin, for example `http://banjo.local:3000`
 
-If your Nicole server is somewhere else, open Settings in the app and change the base URL.
+If you're developing locally, you can still point it at a local server. But the intended setup is one canonical Nicole backend and this app as the native client.
 
 ## Next Phase 2.5 upgrades
 

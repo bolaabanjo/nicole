@@ -2,11 +2,19 @@ import Foundation
 
 @MainActor
 final class ChatViewModel: ObservableObject {
+  enum ConnectionState {
+    case idle
+    case connecting
+    case connected(messageCount: Int)
+    case syncing
+    case failed(String)
+  }
+
   @Published var messages: [NicoleMessage] = []
   @Published var input = ""
   @Published var isLoadingHistory = false
   @Published var isSending = false
-  @Published var statusText = "Connecting..."
+  @Published var connectionState: ConnectionState = .idle
   @Published var errorText: String?
   @Published var backendOrigin: String?
   @Published var lastRequestURL: String?
@@ -15,22 +23,24 @@ final class ChatViewModel: ObservableObject {
 
   func loadHistory(baseURLString: String) async {
     guard !baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      errorText = "Set a backend URL first."
+      errorText = "Set Nicole's server URL in Settings first."
+      connectionState = .idle
       return
     }
 
     isLoadingHistory = true
     errorText = nil
+    connectionState = .connecting
     backendOrigin = await apiClient.normalizedOriginString(baseURLString: baseURLString)
     lastRequestURL = try? await apiClient.historyURLString(baseURLString: baseURLString)
 
     do {
       let loadedMessages = try await apiClient.fetchHistory(baseURLString: baseURLString)
       messages = loadedMessages.filter { $0.role != .system }
-      statusText = loadedMessages.isEmpty ? "Ready" : "Synced"
+      connectionState = .connected(messageCount: messages.count)
     } catch {
       errorText = error.localizedDescription
-      statusText = "Offline"
+      connectionState = .failed(error.localizedDescription)
     }
 
     isLoadingHistory = false
@@ -42,7 +52,7 @@ final class ChatViewModel: ObservableObject {
 
     errorText = nil
     isSending = true
-    statusText = "Nicole is thinking..."
+    connectionState = .syncing
     backendOrigin = await apiClient.normalizedOriginString(baseURLString: baseURLString)
     lastRequestURL = try? await apiClient.streamURLString(baseURLString: baseURLString)
 
@@ -65,7 +75,6 @@ final class ChatViewModel: ObservableObject {
       }
 
       finishAssistantMessage(id: assistantID)
-      statusText = "Synced"
       await loadHistory(baseURLString: baseURLString)
     } catch {
       replaceAssistantPlaceholder(
@@ -73,7 +82,7 @@ final class ChatViewModel: ObservableObject {
         content: "I can't reach Nicole right now."
       )
       errorText = error.localizedDescription
-      statusText = "Offline"
+      connectionState = .failed(error.localizedDescription)
     }
 
     isSending = false

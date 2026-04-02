@@ -61,22 +61,20 @@ struct ContentView: View {
           .font(.system(size: 18, weight: .semibold))
           .foregroundStyle(Color.white)
 
-        Text(viewModel.errorText ?? viewModel.statusText)
+        Text(primaryStatusLine)
           .font(.system(size: 12, weight: .medium))
-          .foregroundStyle(viewModel.errorText == nil ? Color.white.opacity(0.58) : Color.red.opacity(0.9))
+          .foregroundStyle(statusColor)
           .lineLimit(1)
 
-        if let backendOrigin = viewModel.backendOrigin {
-          Text("Backend: \(backendOrigin)")
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(Color.white.opacity(0.42))
-            .lineLimit(1)
-        }
+        Text(secondaryStatusLine)
+          .font(.system(size: 11, weight: .medium))
+          .foregroundStyle(Color.white.opacity(0.42))
+          .lineLimit(1)
 
-        if let lastRequestURL = viewModel.lastRequestURL {
-          Text("Route: \(lastRequestURL)")
+        if let lastRequestURL = viewModel.lastRequestURL, shouldShowDiagnostics {
+          Text("Last route: \(lastRequestURL)")
             .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(Color.white.opacity(0.34))
+            .foregroundStyle(Color.white.opacity(0.32))
             .lineLimit(1)
             .textSelection(.enabled)
         }
@@ -121,7 +119,7 @@ struct ContentView: View {
         .font(.system(size: 28, weight: .semibold))
         .foregroundStyle(Color.white)
 
-      Text("This is the first local macOS shell for Nicole. It already talks to the same brain as the web app, so your history stays shared.")
+      Text(emptyStateBodyText)
         .font(.system(size: 15, weight: .regular))
         .foregroundStyle(Color.white.opacity(0.66))
         .fixedSize(horizontal: false, vertical: true)
@@ -186,17 +184,30 @@ private struct SettingsView: View {
   var body: some View {
     NavigationStack {
       Form {
-        Section("Backend") {
-          TextField("Base URL", text: $settings.baseURLString)
+        Section("Canonical Server") {
+          TextField("Server name", text: $settings.serverName, prompt: Text("Banjo"))
             .textFieldStyle(.roundedBorder)
 
-          Text("Use your local Nicole server, for example `http://127.0.0.1:3000`.")
+          TextField("Nicole server URL", text: $settings.baseURLString, prompt: Text("http://banjo.local:3000"))
+            .textFieldStyle(.roundedBorder)
+
+          Text("Point the Mac app at your canonical Nicole server. This should usually be Banjo, not this Mac.")
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
+
+          if let host = settings.derivedHostLabel {
+            Text("Currently targeting \(host).")
+              .font(.system(size: 12))
+              .foregroundStyle(.secondary)
+          }
         }
 
         Section("Context") {
           Toggle("Include clipboard text", isOn: $settings.includeClipboard)
+
+          Text("Clipboard text can help Nicole understand what you're working on, but it gets sent with each message.")
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
         }
       }
       .formStyle(.grouped)
@@ -210,5 +221,78 @@ private struct SettingsView: View {
       }
     }
     .frame(minWidth: 480, minHeight: 260)
+  }
+}
+
+private extension ContentView {
+  var primaryStatusLine: String {
+    switch viewModel.connectionState {
+    case .idle:
+      return "Choose Nicole's server in Settings."
+    case .connecting:
+      return "Connecting to \(settings.serverDisplayName)…"
+    case .connected(let messageCount):
+      if messageCount == 0 {
+        return "Connected to \(settings.serverDisplayName)"
+      }
+      return "Connected to \(settings.serverDisplayName)"
+    case .syncing:
+      return "Syncing with \(settings.serverDisplayName)…"
+    case .failed:
+      return "Couldn’t reach \(settings.serverDisplayName)"
+    }
+  }
+
+  var secondaryStatusLine: String {
+    if let errorText = viewModel.errorText, case .failed = viewModel.connectionState {
+      return errorText
+    }
+
+    switch viewModel.connectionState {
+    case .idle:
+      return "Set the canonical Nicole server once and this app will keep using it."
+    case .connecting:
+      return settings.derivedHostLabel.map { "Trying \($0)." } ?? "Trying the configured server."
+    case .connected(let messageCount):
+      if messageCount == 0 {
+        return "The server is up, but it returned no shared chat history yet."
+      }
+      return "\(messageCount) shared messages loaded."
+    case .syncing:
+      return "Sending this conversation through the shared Nicole backend."
+    case .failed:
+      return settings.derivedHostLabel.map { "Last known server: \($0)." } ?? "Check the configured server URL."
+    }
+  }
+
+  var statusColor: Color {
+    switch viewModel.connectionState {
+    case .failed:
+      return Color.red.opacity(0.9)
+    case .connected:
+      return Color.white.opacity(0.78)
+    case .syncing, .connecting:
+      return Color.white.opacity(0.68)
+    case .idle:
+      return Color.white.opacity(0.58)
+    }
+  }
+
+  var shouldShowDiagnostics: Bool {
+    if case .failed = viewModel.connectionState {
+      return true
+    }
+    return false
+  }
+
+  var emptyStateBodyText: String {
+    switch viewModel.connectionState {
+    case .connected(let messageCount) where messageCount == 0:
+      return "\(settings.serverDisplayName) is reachable, but it returned no shared chat history yet. If you expected old conversations here, make sure this app is pointed at Banjo's real Nicole backend and database."
+    case .failed:
+      return "This Mac app is only the shell. Nicole's actual memory and conversation history live on the canonical server you connect to."
+    default:
+      return "This is the first native macOS shell for Nicole. It connects to your canonical Nicole server, so the same conversation and memory can follow you across devices."
+    }
   }
 }

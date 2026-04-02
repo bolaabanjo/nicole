@@ -28,9 +28,16 @@ final class AppSettings: ObservableObject {
   }
 
   private enum Keys {
+    static let serverName = "nicole.macos.server-name"
     static let baseURL = "nicole.macos.base-url"
     static let windowMode = "nicole.macos.window-mode"
     static let includeClipboard = "nicole.macos.include-clipboard"
+  }
+
+  @Published var serverName: String {
+    didSet {
+      UserDefaults.standard.set(serverName, forKey: Keys.serverName)
+    }
   }
 
   @Published var baseURLString: String {
@@ -51,9 +58,42 @@ final class AppSettings: ObservableObject {
     }
   }
 
+  var trimmedServerName: String? {
+    let trimmed = serverName.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  var normalizedBaseURLString: String? {
+    let trimmed = baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  var derivedHostLabel: String? {
+    guard
+      let rawValue = normalizedBaseURLString,
+      let components = URLComponents(string: rawValue),
+      let host = components.host,
+      !host.isEmpty
+    else {
+      return nil
+    }
+
+    if let port = components.port {
+      return "\(host):\(port)"
+    }
+
+    return host
+  }
+
+  var serverDisplayName: String {
+    trimmedServerName ?? derivedHostLabel ?? "Nicole server"
+  }
+
   init() {
+    self.serverName =
+      UserDefaults.standard.string(forKey: Keys.serverName) ?? ""
     self.baseURLString =
-      UserDefaults.standard.string(forKey: Keys.baseURL) ?? "http://127.0.0.1:3000"
+      UserDefaults.standard.string(forKey: Keys.baseURL) ?? ""
     self.windowMode =
       WindowMode(rawValue: UserDefaults.standard.string(forKey: Keys.windowMode) ?? "")
       ?? .compact
