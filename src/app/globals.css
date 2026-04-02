@@ -77,12 +77,20 @@
   --sidebar-ring: oklch(0.552 0.016 285.938);
 }
 
+html {
+  min-height: 100%;
+  width: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
   body {
     @apply bg-background text-foreground;
+    min-height: 100dvh;
+    overflow-x: hidden;
   }
 }
 

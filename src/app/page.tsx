@@ -326,10 +326,10 @@ export default function Chat() {
   const isAILoading = sending || streaming;
 
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center">
+    <div className="flex min-h-dvh w-full flex-col items-center bg-background">
       {/* Chat Content */}
-      <main className="flex-1 w-full max-w-3xl mx-auto px-4 py-8 space-y-8 mt-14 pb-40">
-        <div className="space-y-6">
+      <main className="mt-14 flex-1 w-full max-w-3xl px-[max(0.75rem,env(safe-area-inset-left))] py-6 pr-[max(0.75rem,env(safe-area-inset-right))] pb-[calc(env(safe-area-inset-bottom)+8rem)] sm:mx-auto sm:px-4 sm:py-8 sm:pb-40">
+        <div className="space-y-5 sm:space-y-6">
           {messages.map((message, messageIndex) => {
             const isLastMessage = messageIndex === messages.length - 1;
             const isStreamingThis = isLastMessage && isAILoading && message.role === 'assistant';
@@ -342,7 +342,7 @@ export default function Chat() {
             return (
               <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
                 {message.role === 'user' ? (
-                  <div className="max-w-[85%] bg-primary text-primary-foreground rounded-2xl rounded-br-md px-3 py-2">
+                  <div className="max-w-[90%] rounded-2xl rounded-br-md bg-primary px-3 py-2 text-primary-foreground sm:max-w-[85%]">
                     <p className="text-sm">{message.content}</p>
                   </div>
                 ) : (
@@ -383,11 +383,11 @@ export default function Chat() {
       </main>
 
       {/* Fixed Bottom Input */}
-      <div className="fixed bottom-0 left-0 right-0 p-4 bg-background/80 backdrop-blur-sm pb-8">
-        <div className="max-w-3xl mx-auto">
+      <div className="fixed bottom-0 left-0 right-0 bg-background/80 px-[max(0.75rem,env(safe-area-inset-left))] pb-[max(0.75rem,calc(env(safe-area-inset-bottom)+0.75rem))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-3 backdrop-blur-sm sm:px-4 sm:pb-8 sm:pt-4">
+        <div className="w-full max-w-3xl sm:mx-auto">
           {/* File Preview */}
           {selectedFile && (
-            <div className="flex items-center gap-2 mb-3 ml-4">
+            <div className="mb-3 ml-2 flex items-center gap-2 sm:ml-4">
               <div className="relative w-12 h-12 rounded-lg overflow-hidden flex items-center justify-center bg-muted">
                 {selectedFile.type.startsWith('image/') ? (
                   <img
@@ -409,7 +409,7 @@ export default function Chat() {
           )}
 
           <form onSubmit={handleSubmit}>
-            <div className="relative flex items-center gap-2 rounded-full border border-border/50 bg-muted/20 px-2.5 pl-3 py-2 transition-all hover:bg-muted/30 hover:border-border/80 focus-within:border-white/20 focus-within:bg-muted/30">
+            <div className="relative flex items-center gap-2 rounded-full border border-border/50 bg-muted/20 px-2.5 py-2 pl-3 transition-all hover:border-border/80 hover:bg-muted/30 focus-within:border-white/20 focus-within:bg-muted/30">
               <label htmlFor="file-input" className="flex items-center justify-center cursor-pointer text-muted-foreground hover:text-foreground transition-colors">
                 <Plus className="h-4 w-4" />
               </label>
@@ -426,8 +426,8 @@ export default function Chat() {
                 onKeyDown={handleKeyDown}
                 placeholder="Ask a question..."
                 rows={1}
-                className="flex-1 resize-none bg-transparent py-2 text-sm placeholder:text-muted-foreground focus:outline-none max-h-32"
-                style={{ minHeight: '24px' }}
+                className="max-h-32 flex-1 resize-none bg-transparent py-2 text-[16px] leading-6 placeholder:text-muted-foreground focus:outline-none"
+                style={{ minHeight: '24px', fontSize: '16px' }}
               />
               <div className="flex-shrink-0">
                 <Button
