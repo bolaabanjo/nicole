@@ -1,10 +1,15 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
   @ObservedObject var settings: AppSettings
   @ObservedObject var viewModel: ChatViewModel
 
   @State private var isShowingSettings = false
+  @State private var selectedAttachment: ComposerAttachment?
+
+  private let maxContentWidth: CGFloat = 760
 
   var body: some View {
     VStack(spacing: 0) {
@@ -27,6 +32,8 @@ struct ContentView: View {
           }
           .padding(.horizontal, 20)
           .padding(.vertical, 20)
+          .frame(maxWidth: maxContentWidth)
+          .frame(maxWidth: .infinity)
         }
         .background(Color.black)
         .onChange(of: viewModel.messages.last?.id) { _, messageID in
@@ -132,50 +139,75 @@ struct ContentView: View {
 
   private var composer: some View {
     VStack(spacing: 0) {
-      Divider()
-        .overlay(Color.white.opacity(0.08))
-
-      HStack(alignment: .bottom, spacing: 12) {
-        TextField("Talk to Nicole...", text: $viewModel.input, axis: .vertical)
-          .textFieldStyle(.plain)
-          .font(.system(size: 15, weight: .regular))
-          .foregroundStyle(Color.white)
-          .lineLimit(1 ... 6)
-          .submitLabel(.send)
-          .onSubmit {
-            Task {
-              await viewModel.send(baseURLString: settings.baseURLString, settings: settings)
-            }
+      VStack(spacing: 12) {
+        if let selectedAttachment {
+          HStack {
+            attachmentPreview(selectedAttachment)
+            Spacer(minLength: 0)
           }
-
-        Button {
-          Task {
-            await viewModel.send(baseURLString: settings.baseURLString, settings: settings)
-          }
-        } label: {
-          Image(systemName: viewModel.isSending ? "ellipsis" : "arrow.up")
-            .font(.system(size: 15, weight: .bold))
-            .frame(width: 38, height: 38)
-            .background(viewModel.isSending ? Color.white.opacity(0.15) : Color.white)
-            .foregroundStyle(viewModel.isSending ? Color.white.opacity(0.85) : Color.black)
-            .clipShape(Circle())
+          .padding(.horizontal, 4)
+          .transition(.move(edge: .bottom).combined(with: .opacity))
         }
-        .buttonStyle(.plain)
-        .disabled(viewModel.isSending)
+
+        HStack(alignment: .center, spacing: 12) {
+          Button {
+            openAttachmentPicker()
+          } label: {
+            Image(systemName: "plus")
+              .font(.system(size: 15, weight: .medium))
+              .foregroundStyle(Color.white.opacity(0.58))
+              .frame(width: 24, height: 24)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+
+          TextField("Talk to Nicole...", text: $viewModel.input, axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(.system(size: 15, weight: .regular))
+            .foregroundStyle(Color.white.opacity(0.94))
+            .lineLimit(1 ... 8)
+            .submitLabel(.send)
+            .onSubmit {
+              submitCurrentMessage()
+            }
+
+          Button {
+            submitCurrentMessage()
+          } label: {
+            Image(systemName: viewModel.isSending ? "ellipsis" : "arrow.up")
+              .font(.system(size: 15, weight: .bold))
+              .frame(width: 32, height: 32)
+              .background(viewModel.isSending ? Color.white.opacity(0.12) : Color.white)
+              .foregroundStyle(viewModel.isSending ? Color.white.opacity(0.8) : Color.black)
+              .clipShape(Circle())
+          }
+          .buttonStyle(.plain)
+          .disabled(isSendDisabled)
+          .opacity(isSendDisabled ? 0.42 : 1)
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .background(
+          RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(Color.white.opacity(0.045))
+            .overlay(
+              RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
+        )
+
+        Text("Powered by Cencori")
+          .font(.system(size: 10, weight: .medium))
+          .foregroundStyle(Color.white.opacity(0.24))
+          .padding(.bottom, 4)
       }
-      .padding(.horizontal, 16)
-      .padding(.vertical, 14)
-      .background(
-        RoundedRectangle(cornerRadius: 24, style: .continuous)
-          .fill(Color.white.opacity(0.06))
-          .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-              .stroke(Color.white.opacity(0.08), lineWidth: 1)
-          )
-      )
+      .frame(maxWidth: maxContentWidth)
       .padding(.horizontal, 20)
-      .padding(.vertical, 18)
-      .background(Color(red: 0.06, green: 0.06, blue: 0.07))
+      .padding(.top, 16)
+      .padding(.bottom, 12)
+      .frame(maxWidth: .infinity)
+      .background(Color.black)
     }
   }
 }
@@ -294,5 +326,96 @@ private extension ContentView {
     default:
       return "This is the first native macOS shell for Nicole. It connects to your canonical Nicole server, so the same conversation and memory can follow you across devices."
     }
+  }
+
+  var isSendDisabled: Bool {
+    viewModel.isSending || viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  func submitCurrentMessage() {
+    guard !isSendDisabled else { return }
+
+    Task {
+      await viewModel.send(baseURLString: settings.baseURLString, settings: settings)
+    }
+  }
+
+  @ViewBuilder
+  func attachmentPreview(_ attachment: ComposerAttachment) -> some View {
+    ZStack(alignment: .topTrailing) {
+      Group {
+        if let previewImage = attachment.previewImage {
+          Image(nsImage: previewImage)
+            .resizable()
+            .scaledToFill()
+        } else {
+          VStack(spacing: 4) {
+            Image(systemName: "doc.fill")
+              .font(.system(size: 14))
+            Text(attachment.typeLabel)
+              .font(.system(size: 8, weight: .bold))
+          }
+          .foregroundStyle(Color.white.opacity(0.45))
+        }
+      }
+      .frame(width: 44, height: 44)
+      .background(Color.white.opacity(0.06))
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .overlay(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(Color.white.opacity(0.08), lineWidth: 1)
+      )
+
+      Button {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+          selectedAttachment = nil
+        }
+      } label: {
+        Image(systemName: "xmark")
+          .font(.system(size: 8, weight: .bold))
+          .frame(width: 16, height: 16)
+          .background(Color.red.opacity(0.85))
+          .foregroundStyle(Color.white)
+          .clipShape(Circle())
+      }
+      .buttonStyle(.plain)
+      .offset(x: 6, y: -6)
+    }
+    .help(attachment.displayName)
+  }
+
+  func openAttachmentPicker() {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [.content, .item]
+
+    if panel.runModal() == .OK, let url = panel.url {
+      withAnimation(.easeOut(duration: 0.18)) {
+        selectedAttachment = ComposerAttachment(url: url)
+      }
+    }
+  }
+}
+
+private struct ComposerAttachment {
+  let url: URL
+  let displayName: String
+  let typeLabel: String
+  let previewImage: NSImage?
+
+  init(url: URL) {
+    self.url = url
+    self.displayName = url.lastPathComponent
+
+    let fileExtension = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+    if fileExtension.isEmpty {
+      self.typeLabel = "File"
+    } else {
+      self.typeLabel = fileExtension.uppercased()
+    }
+
+    self.previewImage = NSImage(contentsOf: url)
   }
 }
