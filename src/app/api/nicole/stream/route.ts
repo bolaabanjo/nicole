@@ -5,8 +5,10 @@ import { ChatMessage } from "@/lib/ai/types";
 import {
   loadMemories,
   loadRecentMessages,
+  loadConversationSummaryContext,
   saveChatMessage,
   extractAndStoreMemories,
+  summarizeOldConversations,
 } from "@/lib/ai/memory";
 import { searchWeb, formatSearchResults } from "@/lib/search/web";
 import { deepResearch } from "@/lib/search/research";
@@ -34,8 +36,9 @@ export async function POST(req: NextRequest) {
 
     await saveChatMessage("user", message);
 
-    const [memoryText, recentMessages, sourceContext] = await Promise.all([
+    const [memoryText, summaryText, recentMessages, sourceContext] = await Promise.all([
       loadMemories(message),
+      loadConversationSummaryContext(),
       loadRecentMessages(),
       loadRelevantSourceContext(message),
     ]);
@@ -72,6 +75,7 @@ export async function POST(req: NextRequest) {
     }
 
     const systemPrompt = buildSystemPrompt({
+      conversationSummaries: summaryText || undefined,
       memories: memoryText || undefined,
       sourceContext: sourceContext || undefined,
     });
@@ -126,6 +130,7 @@ export async function POST(req: NextRequest) {
             ];
 
             extractAndStoreMemories(lastExchange).catch(() => {});
+            summarizeOldConversations().catch(() => {});
           }
 
           controller.close();

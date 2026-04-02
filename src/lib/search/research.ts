@@ -7,6 +7,7 @@ const EXTRACT_PERSON_FACTS_PROMPT = `You are extracting facts about a specific p
 Rules:
 - Only extract facts directly about this person or their work.
 - Each fact should be a single, clear sentence.
+- Include a short "topic" field when obvious, usually the person's name or a specific project.
 - Include: biography, career, projects, achievements, education, companies, roles, public statements, publications, social profiles.
 - Categorize each as: personal, career, project, achievement, education, or public.
 - Rate importance 1-10 (10 = defining career/identity fact, 1 = trivial mention).
@@ -14,7 +15,7 @@ Rules:
 - If the page has nothing about this person, return an empty array.
 
 Return ONLY valid JSON array, no markdown:
-[{"content": "...", "category": "...", "importance": 7}]`;
+[{"content": "...", "category": "...", "importance": 7, "topic": "..."}]`;
 
 interface ResearchProgress {
   query: string;
@@ -108,7 +109,10 @@ export async function deepResearch(
               category: fact.category,
               importance: fact.importance || 5,
               source: "research",
-              topic: query,
+              topic:
+                typeof fact.topic === "string" && fact.topic.trim()
+                  ? fact.topic.trim()
+                  : query,
             });
             progress.factsExtracted++;
           }

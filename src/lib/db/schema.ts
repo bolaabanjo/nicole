@@ -144,6 +144,22 @@ export const chatMessages = pgTable("chat_messages", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Conversation summaries: compressed snapshots of older chat windows
+export const conversationSummaries = pgTable("conversation_summaries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  startMessageId: uuid("start_message_id").references(() => chatMessages.id, {
+    onDelete: "set null",
+  }),
+  endMessageId: uuid("end_message_id").references(() => chatMessages.id, {
+    onDelete: "set null",
+  }),
+  startCreatedAt: timestamp("start_created_at"),
+  endCreatedAt: timestamp("end_created_at"),
+  messageCount: integer("message_count").notNull().default(0),
+  summary: text("summary").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Notes / writing drafts
 export const notes = pgTable("notes", {
   id: uuid("id").primaryKey().defaultRandom(),

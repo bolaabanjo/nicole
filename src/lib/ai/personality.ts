@@ -57,9 +57,14 @@ Think through complex requests internally, but only output the final response. D
  */
 export function buildSystemPrompt(opts: {
   memories?: string;
+  conversationSummaries?: string;
   sourceContext?: string;
 }): string {
   let prompt = NICOLE_SYSTEM_PROMPT;
+
+  if (opts.conversationSummaries) {
+    prompt += `\n\n## Older conversation summaries\n${opts.conversationSummaries}`;
+  }
 
   if (opts.memories) {
     prompt += `\n\n## What you know about this person\n${opts.memories}`;

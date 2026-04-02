@@ -5,8 +5,10 @@ import { ChatMessage } from "@/lib/ai/types";
 import {
   loadMemories,
   loadRecentMessages,
+  loadConversationSummaryContext,
   saveChatMessage,
   extractAndStoreMemories,
+  summarizeOldConversations,
 } from "@/lib/ai/memory";
 import { searchWeb, formatSearchResults } from "@/lib/search/web";
 import { deepResearch } from "@/lib/search/research";
@@ -36,8 +38,9 @@ export async function POST(req: NextRequest) {
     await saveChatMessage("user", message);
 
     // Load context in parallel
-    const [memoryText, recentMessages, sourceContext] = await Promise.all([
+    const [memoryText, summaryText, recentMessages, sourceContext] = await Promise.all([
       loadMemories(message),
+      loadConversationSummaryContext(),
       loadRecentMessages(),
       loadRelevantSourceContext(message),
     ]);
@@ -75,6 +78,7 @@ export async function POST(req: NextRequest) {
     }
 
     const systemPrompt = buildSystemPrompt({
+      conversationSummaries: summaryText || undefined,
       memories: memoryText || undefined,
       sourceContext: sourceContext || undefined,
     });
@@ -88,6 +92,7 @@ export async function POST(req: NextRequest) {
     const fullMessages: ChatMessage[] = [
       { role: "system", content: fullSystemPrompt },
       ...recentMessages,
+      { role: "user", content: message },
     ];
 
     const response = await chat(fullMessages);
@@ -104,6 +109,7 @@ export async function POST(req: NextRequest) {
       { role: "assistant", content },
     ];
     extractAndStoreMemories(lastExchange).catch(() => {});
+    summarizeOldConversations().catch(() => {});
 
     return NextResponse.json({ content });
   } catch (error) {
