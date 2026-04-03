@@ -9,15 +9,21 @@ struct NicoleMacOSApp: App {
   var body: some Scene {
     WindowGroup("Nicole") {
       ContentView(settings: settings, viewModel: viewModel)
+        .onAppear {
+          if settings.windowMode != .expanded {
+            settings.windowMode = .expanded
+          }
+          CompactWindowManager.shared.setup(settings: settings, viewModel: viewModel)
+        }
     }
-    .defaultSize(width: settings.windowMode.idealWidth, height: 760)
+    .defaultSize(width: AppSettings.WindowMode.expanded.idealWidth, height: 760)
     .windowResizability(.contentMinSize)
     .commands {
       CommandMenu("Nicole") {
         Button("Toggle Nicole") {
           appDelegate.toggleNicolePanel()
         }
-        .keyboardShortcut("n", modifiers: [.command, .shift])
+        .keyboardShortcut("n", modifiers: .control)
       }
     }
   }

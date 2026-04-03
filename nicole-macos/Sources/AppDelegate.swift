@@ -21,15 +21,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @MainActor
   func toggleNicolePanel() {
-    WorkspaceContextProvider.captureExternalContext()
-    OverlayWindowManager.shared.togglePanel()
+    Task { @MainActor in
+      await WorkspaceContextProvider.captureExternalContext()
+      CompactWindowManager.shared.togglePanel()
+    }
   }
 
   private func installHotkeyMonitors() {
     localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
       if Self.isToggleEvent(event) {
         Task { @MainActor in
-          OverlayWindowManager.shared.togglePanel()
+          await WorkspaceContextProvider.captureExternalContext()
+          CompactWindowManager.shared.togglePanel()
         }
         return nil
       }
@@ -40,7 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     globalHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
       if Self.isToggleEvent(event) {
         Task { @MainActor in
-          OverlayWindowManager.shared.togglePanel()
+          await WorkspaceContextProvider.captureExternalContext()
+          CompactWindowManager.shared.togglePanel()
         }
       }
     }
@@ -48,7 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private static func isToggleEvent(_ event: NSEvent) -> Bool {
     let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-    guard modifiers.contains(.command), modifiers.contains(.shift) else {
+    guard modifiers.contains(.control), !modifiers.contains(.command), !modifiers.contains(.shift), !modifiers.contains(.option) else {
       return false
     }
 

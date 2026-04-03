@@ -1,12 +1,12 @@
 import Foundation
 
-enum NicoleMessageRole: String, Codable {
+enum NicoleMessageRole: String, Codable, Sendable {
   case system
   case user
   case assistant
 }
 
-struct NicoleMessage: Identifiable, Equatable {
+struct NicoleMessage: Identifiable, Equatable, Sendable {
   let id: String
   let role: NicoleMessageRole
   var content: String
@@ -37,7 +37,7 @@ struct NicoleMessage: Identifiable, Equatable {
   }
 }
 
-struct RemoteNicoleMessage: Decodable {
+struct RemoteNicoleMessage: Decodable, Sendable {
   let id: String
   let role: String
   let content: String
@@ -53,7 +53,7 @@ struct RemoteNicoleMessage: Decodable {
   }
 }
 
-struct NicoleWorkspaceContextPayload: Encodable {
+struct NicoleWorkspaceContextPayload: Encodable, Sendable {
   let surface: String
   let activeApp: String?
   let windowTitle: String?
@@ -118,12 +118,12 @@ extension NicoleWorkspaceContextPayload {
   }
 }
 
-struct NicoleChatRequestBody: Encodable {
+struct NicoleChatRequestBody: Encodable, Sendable {
   let message: String
   let context: NicoleWorkspaceContextPayload?
 }
 
-struct NicoleIngestResult: Decodable {
+struct NicoleIngestResult: Decodable, Sendable {
   let sourceId: String
   let title: String
   let chunkCount: Int

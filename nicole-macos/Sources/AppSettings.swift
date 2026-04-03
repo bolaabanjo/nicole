@@ -22,7 +22,44 @@ final class AppSettings: ObservableObject {
       case .compact:
         return 620
       case .expanded:
-        return 960
+        return 1180
+      }
+    }
+
+    var minimumWidth: Double {
+      switch self {
+      case .compact:
+        return 560
+      case .expanded:
+        return 980
+      }
+    }
+
+    var minimumHeight: Double {
+      switch self {
+      case .compact:
+        return 680
+      case .expanded:
+        return 760
+      }
+    }
+
+    var chatCanvasWidth: Double {
+      switch self {
+      case .compact:
+        return 760
+      case .expanded:
+        return 860
+      }
+
+    }
+
+    var usesSidebar: Bool {
+      switch self {
+      case .compact:
+        return false
+      case .expanded:
+        return true
       }
     }
   }
@@ -98,7 +135,7 @@ final class AppSettings: ObservableObject {
       UserDefaults.standard.string(forKey: Keys.baseURL) ?? ""
     self.windowMode =
       WindowMode(rawValue: UserDefaults.standard.string(forKey: Keys.windowMode) ?? "")
-      ?? .compact
+      ?? .expanded
     self.includeClipboard =
       UserDefaults.standard.object(forKey: Keys.includeClipboard) as? Bool ?? true
   }

@@ -84,44 +84,114 @@ final class ChatViewModel: ObservableObject {
       }
     }
 
+    guard let assistantID = await beginStreamSend(
+      message: trimmed,
+      baseURLString: baseURLString,
+      settings: settings,
+      clearInputOnSuccess: true
+    ) else {
+      isSending = false
+      return false
+    }
+
+    return !assistantID.isEmpty
+  }
+
+  func sendCompactMessage(
+    _ message: String,
+    baseURLString: String,
+    settings: AppSettings
+  ) async -> String? {
+    let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !isSending else { return nil }
+
+    errorText = nil
+    infoText = nil
+    isSending = true
+    connectionState = .syncing
+    backendOrigin = await apiClient.normalizedOriginString(baseURLString: baseURLString)
+
+    return await beginStreamSend(
+      message: trimmed,
+      baseURLString: baseURLString,
+      settings: settings,
+      clearInputOnSuccess: false
+    )
+  }
+
+  private var thoughtStartTimes: [String: Date] = [:]
+
+  private func beginStreamSend(
+    message: String,
+    baseURLString: String,
+    settings: AppSettings,
+    clearInputOnSuccess: Bool
+  ) async -> String? {
     lastRequestURL = try? await apiClient.streamURLString(baseURLString: baseURLString)
 
-    let userMessage = NicoleMessage(role: .user, content: trimmed)
+    let userMessage = NicoleMessage(role: .user, content: message)
     messages.append(userMessage)
-    input = ""
+
+    if clearInputOnSuccess {
+      input = ""
+    }
 
     let assistantID = UUID().uuidString
     messages.append(
-      NicoleMessage(id: assistantID, role: .assistant, content: "", isStreaming: true, isThoughtOpen: true)
+      NicoleMessage(
+        id: assistantID,
+        role: .assistant,
+        content: "",
+        isStreaming: true,
+        thoughtContent: nil,
+        isThoughtOpen: true
+      )
     )
 
+    let context = await WorkspaceContextProvider.currentContext(settings: settings)
+
+    Task { @MainActor [weak self] in
+      await self?.performStreamSend(
+        baseURLString: baseURLString,
+        message: message,
+        assistantID: assistantID,
+        context: context
+      )
+    }
+
+    return assistantID
+  }
+
+  private func performStreamSend(
+    baseURLString: String,
+    message: String,
+    assistantID: String,
+    context: NicoleWorkspaceContextPayload
+  ) async {
     do {
       try await apiClient.streamReply(
         baseURLString: baseURLString,
-        message: trimmed,
-        context: WorkspaceContextProvider.currentContext(settings: settings)
+        message: message,
+        context: context
       ) { [weak self] chunk in
         await self?.appendAssistantChunk(chunk, assistantID: assistantID)
       }
 
       finishAssistantMessage(id: assistantID)
-      await loadHistory(baseURLString: baseURLString)
+      connectionState = .connected(
+        messageCount: messages.filter { $0.role != .system }.count
+      )
+      isSending = false
     } catch {
       replaceAssistantPlaceholder(
         id: assistantID,
-        content: "I can't reach Nicole right now."
+        content: "I'm Unavailable Right Now"
       )
       errorText = error.localizedDescription
       connectionState = .failed(error.localizedDescription)
       isSending = false
-      return false
     }
-
-    isSending = false
-    return true
   }
-
-  private var thoughtStartTimes: [String: Date] = [:]
 
   private func appendAssistantChunk(_ chunk: String, assistantID: String) {
     guard let index = messages.firstIndex(where: { $0.id == assistantID }) else {

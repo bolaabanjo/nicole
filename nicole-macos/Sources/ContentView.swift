@@ -8,7 +8,6 @@ struct ContentView: View {
 
   @State private var isShowingSettings = false
   @State private var selectedAttachment: ComposerAttachment?
-  @State private var workspacePreview: NicoleWorkspaceContextPayload?
   @State private var isDropTargeted = false
 
   private let maxContentWidth: CGFloat = 760
@@ -16,9 +15,6 @@ struct ContentView: View {
   var body: some View {
     VStack(spacing: 0) {
       header
-
-      Divider()
-        .overlay(Color.white.opacity(0.08))
 
       ScrollViewReader { proxy in
         ScrollView {
@@ -49,35 +45,17 @@ struct ContentView: View {
       composer
     }
     .frame(
-      minWidth: 560,
-      idealWidth: settings.windowMode.idealWidth,
-      minHeight: 680
+      minWidth: AppSettings.WindowMode.expanded.minimumWidth,
+      idealWidth: AppSettings.WindowMode.expanded.idealWidth,
+      minHeight: AppSettings.WindowMode.expanded.minimumHeight
     )
     .background(Color.black)
     .preferredColorScheme(.dark)
-    .background(
-      WindowAccessor { window in
-        OverlayWindowManager.shared.attach(
-          window: window,
-          preferredWidth: settings.windowMode.idealWidth
-        )
-      }
-    )
     .sheet(isPresented: $isShowingSettings) {
       SettingsView(settings: settings)
     }
     .task {
       await viewModel.loadHistory(baseURLString: settings.baseURLString)
-      refreshWorkspacePreview()
-    }
-    .onChange(of: settings.windowMode) { _, mode in
-      OverlayWindowManager.shared.updatePreferredWidth(mode.idealWidth)
-    }
-    .onChange(of: settings.includeClipboard) { _, _ in
-      refreshWorkspacePreview()
-    }
-    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-      refreshWorkspacePreview()
     }
   }
 
@@ -105,25 +83,6 @@ struct ContentView: View {
         Spacer()
 
         HStack(spacing: 16) {
-          Picker("Mode", selection: $settings.windowMode) {
-            ForEach(AppSettings.WindowMode.allCases) { mode in
-              Text(mode.title).tag(mode)
-            }
-          }
-          .pickerStyle(.segmented)
-          .frame(width: 160)
-          .scaleEffect(0.9)
-
-          Button {
-            NSApp.keyWindow?.toggleFullScreen(nil)
-          } label: {
-            Image(systemName: "arrow.up.left.and.arrow.down.right")
-              .font(.system(size: 14, weight: .medium))
-          }
-          .buttonStyle(.plain)
-          .foregroundStyle(Color.white.opacity(0.58))
-          .help("Toggle Fullscreen")
-
           Button {
             Task {
               await viewModel.loadHistory(baseURLString: settings.baseURLString)
@@ -151,7 +110,7 @@ struct ContentView: View {
       .padding(.horizontal, 20)
       Spacer()
     }
-    .padding(.vertical, 14)
+    .padding(.vertical, 8)
     .background(Color.black)
   }
 
@@ -185,11 +144,6 @@ struct ContentView: View {
   private var composer: some View {
     VStack(spacing: 0) {
       VStack(spacing: 12) {
-        if let workspacePreview, workspacePreview.hasMeaningfulWorkspaceContext {
-          contextPreview(workspacePreview)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-        }
-
         if let selectedAttachment {
           HStack {
             attachmentPreview(selectedAttachment)
@@ -299,9 +253,7 @@ private struct SettingsView: View {
         }
 
         Section("Context") {
-          Toggle("Include clipboard text", isOn: $settings.includeClipboard)
-
-          Text("Clipboard text can help Nicole understand what you're working on, but it gets sent with each message.")
+          Text("Nicole now uses hidden local workspace sensing on your Mac. Accessibility improves selected text capture, and Screen Recording enables local OCR of visible screen text. Nothing is shown visibly in the UI.")
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
         }
@@ -352,12 +304,12 @@ private extension ContentView {
     case .idle:
       return "Set the canonical Nicole server once and this app will keep using it."
     case .connecting:
-      return settings.derivedHostLabel.map { "Trying \($0). Toggle with Command-Shift-N." } ?? "Trying the configured server."
+      return settings.derivedHostLabel.map { "Trying \($0). Summon Compact with Control-N." } ?? "Trying the configured server."
     case .connected(let messageCount):
       if messageCount == 0 {
         return "The server is up, but it returned no shared chat history yet."
       }
-      return "\(messageCount) shared messages loaded. Toggle with Command-Shift-N."
+      return "\(messageCount) shared messages loaded. Summon Compact with Control-N."
     case .syncing:
       return "Sending this conversation through the shared Nicole backend."
     case .failed:
@@ -506,49 +458,6 @@ private extension ContentView {
     return true
   }
 
-  @ViewBuilder
-  func contextPreview(_ context: NicoleWorkspaceContextPayload) -> some View {
-    VStack(alignment: .leading, spacing: 6) {
-      HStack(spacing: 8) {
-        Image(systemName: "scope")
-          .font(.system(size: 11, weight: .semibold))
-          .foregroundStyle(Color.white.opacity(0.46))
-
-        Text(context.summaryTitle)
-          .font(.system(size: 12, weight: .semibold))
-          .foregroundStyle(Color.white.opacity(0.78))
-
-        if let detail = context.summaryDetail {
-          Text(detail)
-            .font(.system(size: 12, weight: .regular))
-            .foregroundStyle(Color.white.opacity(0.44))
-            .lineLimit(1)
-        }
-      }
-
-      if let preview = context.selectedTextPreview {
-        Text(preview)
-          .font(.system(size: 11, weight: .regular))
-          .foregroundStyle(Color.white.opacity(0.42))
-          .lineLimit(2)
-      }
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 10)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(
-      RoundedRectangle(cornerRadius: 18, style: .continuous)
-        .fill(Color.white.opacity(0.04))
-        .overlay(
-          RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
-    )
-  }
-
-  func refreshWorkspacePreview() {
-    workspacePreview = WorkspaceContextProvider.previewContext(settings: settings)
-  }
 }
 
 private struct ComposerAttachment {
