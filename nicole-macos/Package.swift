@@ -3,19 +3,19 @@
 import PackageDescription
 
 let package = Package(
-  name: "NicoleMacOS",
+  name: "Nicole",
   platforms: [
     .macOS(.v14),
   ],
-  products: [
-    .executable(
-      name: "NicoleMacOS",
-      targets: ["NicoleMacOS"]
-    ),
+  dependencies: [
+    .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
   ],
   targets: [
     .executableTarget(
       name: "NicoleMacOS",
+      dependencies: [
+        .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+      ],
       path: "Sources"
     ),
   ]

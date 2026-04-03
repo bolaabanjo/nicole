@@ -21,6 +21,7 @@ final class ChatViewModel: ObservableObject {
   @Published var lastRequestURL: String?
 
   private let apiClient = NicoleAPIClient()
+  private var rawAssistantBuffers: [String: String] = [:]
 
   func loadHistory(baseURLString: String) async {
     guard !baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -137,6 +138,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     let assistantID = UUID().uuidString
+    rawAssistantBuffers[assistantID] = ""
     messages.append(
       NicoleMessage(
         id: assistantID,
@@ -199,57 +201,128 @@ final class ChatViewModel: ObservableObject {
     }
 
     var message = messages[index]
-    
-    let rawContent = (message.thoughtContent ?? "") + message.content + chunk
-    
-    // Timer handling
+
+    let rawContent = (rawAssistantBuffers[assistantID] ?? "") + chunk
+    rawAssistantBuffers[assistantID] = rawContent
+
     if thoughtStartTimes[assistantID] == nil {
-        thoughtStartTimes[assistantID] = Date()
+      thoughtStartTimes[assistantID] = Date()
     }
-    
-    // Extremely basic <thought> parser for streaming
-    if let thoughtStart = rawContent.range(of: "<thought>") {
-        message.isThoughtOpen = true
-        let afterStart = String(rawContent[thoughtStart.upperBound...])
-        
-        if let thoughtEnd = afterStart.range(of: "</thought>") {
-            // Thought finished
-            if let start = thoughtStartTimes[assistantID] {
-                message.thoughtDuration = Int(Date().timeIntervalSince(start))
-            }
-            message.thoughtContent = String(afterStart[..<thoughtEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            message.content = String(afterStart[thoughtEnd.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            // Still in thought
-            message.thoughtContent = afterStart.trimmingCharacters(in: .whitespacesAndNewlines)
-            message.content = ""
-            // Update duration if possible (optional: could also use a separate @Published duration)
-            if let start = thoughtStartTimes[assistantID] {
-                message.thoughtDuration = Int(Date().timeIntervalSince(start))
-            }
-        }
+
+    let parsed = parseAssistantBuffer(rawContent)
+
+    if parsed.isThoughtOpen || parsed.thoughtContent != nil {
+      message.isThoughtOpen = parsed.isThoughtOpen
+      message.thoughtContent = parsed.thoughtContent
+
+      if let start = thoughtStartTimes[assistantID] {
+        message.thoughtDuration = Int(Date().timeIntervalSince(start))
+      }
     } else {
-        // No thought tag found yet or at all
-        message.content = rawContent
+      message.isThoughtOpen = false
+      message.thoughtContent = nil
     }
-    
+
+    message.content = parsed.visibleContent
     messages[index] = message
   }
 
   private func finishAssistantMessage(id: String) {
     guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
     messages[index].isStreaming = false
-    
-    // Auto-close thought when finished if it was open
+
+    let finalRaw = rawAssistantBuffers[id] ?? messages[index].content
+    let parsed = parseAssistantBuffer(finalRaw)
+    messages[index].content = parsed.visibleContent
+    messages[index].thoughtContent = parsed.thoughtContent
+
     if messages[index].thoughtContent != nil {
-        messages[index].isThoughtOpen = false
+      messages[index].isThoughtOpen = false
     }
+
     thoughtStartTimes.removeValue(forKey: id)
+    rawAssistantBuffers.removeValue(forKey: id)
   }
 
   private func replaceAssistantPlaceholder(id: String, content: String) {
     guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-    messages[index].content = content
+    messages[index].content = sanitizeVisibleAssistantContent(content)
+    messages[index].thoughtContent = nil
+    messages[index].isThoughtOpen = false
     messages[index].isStreaming = false
+    rawAssistantBuffers.removeValue(forKey: id)
+    thoughtStartTimes.removeValue(forKey: id)
   }
+}
+
+private struct ParsedAssistantBuffer {
+  let thoughtContent: String?
+  let visibleContent: String
+  let isThoughtOpen: Bool
+}
+
+private func parseAssistantBuffer(_ raw: String) -> ParsedAssistantBuffer {
+  let thinkOpenTag = "<think>"
+  let thinkCloseTag = "</think>"
+  let thoughtOpenTag = "<thought>"
+  let thoughtCloseTag = "</thought>"
+
+  if let range = raw.range(of: thinkOpenTag) {
+    return parseTaggedAssistantBuffer(
+      raw,
+      openRange: range,
+      closeTag: thinkCloseTag
+    )
+  }
+
+  if let range = raw.range(of: thoughtOpenTag) {
+    return parseTaggedAssistantBuffer(
+      raw,
+      openRange: range,
+      closeTag: thoughtCloseTag
+    )
+  }
+
+  return ParsedAssistantBuffer(
+    thoughtContent: nil,
+    visibleContent: sanitizeVisibleAssistantContent(raw),
+    isThoughtOpen: false
+  )
+}
+
+private func parseTaggedAssistantBuffer(
+  _ raw: String,
+  openRange: Range<String.Index>,
+  closeTag: String
+) -> ParsedAssistantBuffer {
+  let before = String(raw[..<openRange.lowerBound])
+  let afterOpen = String(raw[openRange.upperBound...])
+
+  if let closeRange = afterOpen.range(of: closeTag) {
+    let thought = String(afterOpen[..<closeRange.lowerBound])
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let afterClose = String(afterOpen[closeRange.upperBound...])
+    let visible = sanitizeVisibleAssistantContent(before + afterClose)
+
+    return ParsedAssistantBuffer(
+      thoughtContent: thought.isEmpty ? nil : thought,
+      visibleContent: visible,
+      isThoughtOpen: false
+    )
+  }
+
+  return ParsedAssistantBuffer(
+    thoughtContent: afterOpen.trimmingCharacters(in: .whitespacesAndNewlines),
+    visibleContent: sanitizeVisibleAssistantContent(before),
+    isThoughtOpen: true
+  )
+}
+
+private func sanitizeVisibleAssistantContent(_ text: String) -> String {
+  text
+    .replacingOccurrences(of: "<think>", with: "")
+    .replacingOccurrences(of: "</think>", with: "")
+    .replacingOccurrences(of: "<thought>", with: "")
+    .replacingOccurrences(of: "</thought>", with: "")
+    .trimmingCharacters(in: .whitespacesAndNewlines)
 }

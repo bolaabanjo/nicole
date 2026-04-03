@@ -15,6 +15,8 @@ const OLLAMA_BASE_URL = normalizeBaseUrl(
 );
 const OLLAMA_CHAT_MODEL = process.env.OLLAMA_CHAT_MODEL || CHAT_MODEL;
 const OLLAMA_EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
+const OLLAMA_THINKING_ENABLED =
+  process.env.OLLAMA_THINKING_ENABLED?.trim().toLowerCase() === "true";
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 const OLLAMA_REQUEST_TIMEOUT_MS = Number.parseInt(
   process.env.OLLAMA_REQUEST_TIMEOUT_MS || "120000",
@@ -119,6 +121,7 @@ async function ollamaChat(
       model: OLLAMA_CHAT_MODEL,
       messages,
       stream: false,
+      think: OLLAMA_THINKING_ENABLED,
       keep_alive: OLLAMA_KEEP_ALIVE,
       options: buildOllamaOptions(options),
     }),
@@ -154,6 +157,7 @@ async function ollamaChatStream(
       model: OLLAMA_CHAT_MODEL,
       messages,
       stream: true,
+      think: OLLAMA_THINKING_ENABLED,
       keep_alive: OLLAMA_KEEP_ALIVE,
       options: buildOllamaOptions(options),
     }),
