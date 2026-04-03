@@ -4,7 +4,7 @@ import { parsePdf } from "./parsers/pdf";
 import { parseUrl } from "./parsers/url";
 import { parseMarkdown } from "./parsers/markdown";
 import { chunkText } from "./chunker";
-import { embed, isOnline } from "@/lib/ai/router";
+import { embed, isEmbeddingAvailable } from "@/lib/ai/router";
 import { eq } from "drizzle-orm";
 
 interface IngestResult {
@@ -20,8 +20,7 @@ interface IngestResult {
  * 1. Parse to text (works offline)
  * 2. Chunk semantically (works offline)
  * 3. Store source + chunks in Postgres (works offline)
- * 4. Generate embeddings via the configured embedding provider
- *    (currently Cencori, requires internet, skipped if offline)
+ * 4. Generate embeddings via the configured embedding provider.
  */
 export async function ingest(input: {
   type: "pdf" | "url" | "note";
@@ -76,10 +75,10 @@ export async function ingest(input: {
     await db.insert(chunks).values(chunkRecords);
   }
 
-  // 5. Generate embeddings if online
+  // 5. Generate embeddings when an embedding provider is configured
   let embeddingsGenerated = false;
 
-  if (await isOnline()) {
+  if (isEmbeddingAvailable()) {
     try {
       // Fetch the inserted chunks to get their IDs
       const insertedChunks = await db.query.chunks.findMany({

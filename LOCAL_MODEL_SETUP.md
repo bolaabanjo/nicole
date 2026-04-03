@@ -23,6 +23,8 @@ Add these environment variables on Banjo:
 CHAT_PROVIDER=ollama
 OLLAMA_BASE_URL=http://YOUR_MAC_LAN_IP:11434
 OLLAMA_CHAT_MODEL=qwen3.5:9b
+EMBED_PROVIDER=ollama
+OLLAMA_EMBED_MODEL=nomic-embed-text
 OLLAMA_KEEP_ALIVE=30m
 CHAT_FALLBACK_PROVIDER=cencori
 ```
@@ -31,16 +33,16 @@ Recommended while migrating:
 
 ```env
 CHAT_MODEL=qwen3.5:9b
-EMBED_MODEL=text-embedding-004
 ```
 
 Notes:
 
 - `CHAT_PROVIDER=ollama` makes Banjo send Nicole chat requests to your Mac.
 - `OLLAMA_BASE_URL` should point at the Mac running Ollama, not Banjo.
+- `EMBED_PROVIDER=ollama` makes Banjo generate memory/source embeddings on your Mac too.
+- `nomic-embed-text` matches Nicole's current `768`-dimension pgvector schema.
 - `CHAT_FALLBACK_PROVIDER=cencori` keeps Nicole alive if your Mac is asleep or
   Ollama is unavailable.
-- Embeddings still use the existing provider path for now.
 
 ## Mac Setup
 
@@ -48,6 +50,7 @@ Run Ollama on your Mac and pull the model:
 
 ```bash
 ollama pull qwen3.5:9b
+ollama pull nomic-embed-text
 ```
 
 Then make sure Ollama is reachable from Banjo on your local network. If Banjo
@@ -66,6 +69,6 @@ cannot reach your Mac yet, fix that before switching Nicole over.
 
 - Chat can run through Ollama on your Mac.
 - Streaming is supported.
+- Embeddings can run through Ollama on your Mac with `nomic-embed-text`.
 - Banjo still owns all shared history, memory, tools, and sources.
 - If configured, Cencori can remain as fallback.
-- Embeddings have not moved local yet.

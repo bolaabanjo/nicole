@@ -2,7 +2,7 @@ import { getCencoriClient } from "./cencori";
 import { ChatMessage, ChatOptions } from "./types";
 
 type ChatProvider = "cencori" | "ollama";
-type EmbedProvider = "cencori" | "none";
+type EmbedProvider = "cencori" | "ollama" | "none";
 
 const CHAT_PROVIDER = resolveChatProvider();
 const EMBED_PROVIDER = resolveEmbedProvider();
@@ -14,9 +14,14 @@ const OLLAMA_BASE_URL = normalizeBaseUrl(
   process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST || "http://127.0.0.1:11434"
 );
 const OLLAMA_CHAT_MODEL = process.env.OLLAMA_CHAT_MODEL || CHAT_MODEL;
+const OLLAMA_EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 const OLLAMA_REQUEST_TIMEOUT_MS = Number.parseInt(
   process.env.OLLAMA_REQUEST_TIMEOUT_MS || "120000",
+  10
+);
+const OLLAMA_EMBED_TIMEOUT_MS = Number.parseInt(
+  process.env.OLLAMA_EMBED_TIMEOUT_MS || "45000",
   10
 );
 const CHAT_FALLBACK_PROVIDER =
@@ -289,13 +294,17 @@ function extractStreamText(chunk: unknown): string {
 }
 
 /**
- * Generate an embedding for a piece of text through Cencori.
+ * Generate an embedding through the configured embedding provider.
  */
 export async function embed(text: string): Promise<number[]> {
   if (!isEmbeddingAvailable()) {
     throw new Error(
       "Embeddings are not configured. Set CENCORI_API_KEY or add a local embedding provider."
     );
+  }
+
+  if (EMBED_PROVIDER === "ollama") {
+    return ollamaEmbed(text);
   }
 
   const response = await getCencoriClient().ai.embeddings({
@@ -322,6 +331,10 @@ export async function isOnline(): Promise<boolean> {
 }
 
 export function isEmbeddingAvailable(): boolean {
+  if (EMBED_PROVIDER === "ollama") {
+    return Boolean(OLLAMA_BASE_URL);
+  }
+
   return EMBED_PROVIDER === "cencori" && Boolean(process.env.CENCORI_API_KEY);
 }
 
@@ -354,8 +367,16 @@ function resolveEmbedProvider(): EmbedProvider {
     return "none";
   }
 
+  if (configuredProvider === "ollama") {
+    return "ollama";
+  }
+
   if (configuredProvider === "cencori") {
     return "cencori";
+  }
+
+  if (CHAT_PROVIDER === "ollama" && (process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST)) {
+    return "ollama";
   }
 
   if (process.env.CENCORI_API_KEY) {
@@ -395,6 +416,46 @@ function buildOllamaOptions(options: ChatOptions): Record<string, number> | unde
   }
 
   return Object.keys(ollamaOptions).length > 0 ? ollamaOptions : undefined;
+}
+
+async function ollamaEmbed(text: string): Promise<number[]> {
+  const response = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OLLAMA_EMBED_MODEL,
+      input: text,
+      keep_alive: OLLAMA_KEEP_ALIVE,
+    }),
+    signal: AbortSignal.timeout(OLLAMA_EMBED_TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Ollama embedding error: ${await readError(response)}`);
+  }
+
+  const data = (await response.json()) as {
+    error?: string;
+    embeddings?: number[][];
+    embedding?: number[];
+  };
+
+  if (data.error) {
+    throw new Error(`Ollama embedding error: ${data.error}`);
+  }
+
+  if (Array.isArray(data.embedding) && data.embedding.length > 0) {
+    return data.embedding;
+  }
+
+  const firstEmbedding = Array.isArray(data.embeddings) ? data.embeddings[0] : null;
+  if (Array.isArray(firstEmbedding) && firstEmbedding.length > 0) {
+    return firstEmbedding;
+  }
+
+  throw new Error("Ollama did not return an embedding vector.");
 }
 
 function extractOllamaStreamText(line: string): string {
