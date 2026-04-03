@@ -20,7 +20,8 @@ interface IngestResult {
  * 1. Parse to text (works offline)
  * 2. Chunk semantically (works offline)
  * 3. Store source + chunks in Postgres (works offline)
- * 4. Generate embeddings via Cencori (requires internet, skipped if offline)
+ * 4. Generate embeddings via the configured embedding provider
+ *    (currently Cencori, requires internet, skipped if offline)
  */
 export async function ingest(input: {
   type: "pdf" | "url" | "note";
