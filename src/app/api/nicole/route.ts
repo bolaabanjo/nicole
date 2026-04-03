@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
       loadMemories(message),
       loadConversationSummaryContext(),
       loadRecentMessages(),
-      loadRelevantSourceContext(message),
+      loadRelevantSourceContext(message, undefined, "personal"),
     ]);
 
     const systemPrompt = buildSystemPrompt({

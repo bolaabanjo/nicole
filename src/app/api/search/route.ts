@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { searchRelevantSourceChunks } from "@/lib/search/semantic";
+import { SourceScope } from "@/lib/db/schema";
 
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as {
       query?: string;
       limit?: number;
+      scope?: SourceScope | SourceScope[];
     };
     const query = body.query?.trim();
 
@@ -18,7 +20,8 @@ export async function POST(req: NextRequest) {
 
     const results = await searchRelevantSourceChunks(
       query,
-      Math.min(Math.max(body.limit ?? 8, 1), 12)
+      Math.min(Math.max(body.limit ?? 8, 1), 12),
+      body.scope
     );
 
     return NextResponse.json({ results });

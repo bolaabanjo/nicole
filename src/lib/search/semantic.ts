@@ -1,5 +1,5 @@
 import { db } from "@/lib/db/client";
-import { chunks, sources } from "@/lib/db/schema";
+import { chunks, sources, SourceScope } from "@/lib/db/schema";
 import { embed, isEmbeddingAvailable } from "@/lib/ai/router";
 import {
   and,
@@ -7,6 +7,7 @@ import {
   cosineDistance,
   desc,
   eq,
+  inArray,
   ilike,
   isNotNull,
   or,
@@ -22,39 +23,44 @@ export interface SourceChunkMatch {
   sourceId: string;
   sourceTitle: string;
   sourceType: string;
+  sourceScope: SourceScope;
   content: string;
   position: number | null;
   score: number | null;
   matchType: "semantic" | "keyword";
 }
 
+type SourceScopeFilter = SourceScope | SourceScope[];
+
 export async function searchRelevantSourceChunks(
   query: string,
-  limit = DEFAULT_RESULT_LIMIT
+  limit = DEFAULT_RESULT_LIMIT,
+  scope?: SourceScopeFilter
 ): Promise<SourceChunkMatch[]> {
   const trimmed = query.trim();
 
   if (!trimmed) return [];
 
   if (isEmbeddingAvailable()) {
-    const semanticMatches = await semanticChunkSearch(trimmed, limit);
+    const semanticMatches = await semanticChunkSearch(trimmed, limit, scope);
     if (semanticMatches.length > 0) {
       return semanticMatches;
     }
   }
 
-  return keywordChunkSearch(trimmed, limit);
+  return keywordChunkSearch(trimmed, limit, scope);
 }
 
 export async function loadRelevantSourceContext(
   query: string,
-  limit = DEFAULT_RESULT_LIMIT
+  limit = DEFAULT_RESULT_LIMIT,
+  scope?: SourceScopeFilter
 ): Promise<string> {
   if (!shouldUseSourceRetrieval(query)) {
     return "";
   }
 
-  const matches = await searchRelevantSourceChunks(query, limit);
+  const matches = await searchRelevantSourceChunks(query, limit, scope);
   if (matches.length === 0) {
     return "";
   }
@@ -81,20 +87,38 @@ function shouldUseSourceRetrieval(query: string): boolean {
     return false;
   }
 
+  const personalConversationPatterns = [
+    /\bwho are you\b/,
+    /\bwhat are you\b/,
+    /\bwhat'?s your name\b/,
+    /\byou know me\b/,
+    /\bdo you know me\b/,
+    /\bwho am i\b/,
+    /\bremember me\b/,
+    /\bwhat do you know about me\b/,
+    /\bi just coded\b/,
+    /\bidentity\b/,
+  ];
+
+  if (personalConversationPatterns.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+
   if (
-    /\b(notes?|source|sources|document|pdf|paper|chapter|library|study|quiz|summari[sz]e|explain|according to|from my)\b/.test(
+    /\b(notes?|source|sources|document|documents|doc|docs|pdf|paper|chapter|library|study|quiz|according to|from my|from the docs|from my notes|from my sources|search my)\b/.test(
       normalized
     )
   ) {
     return true;
   }
 
-  return normalized.length >= 18;
+  return false;
 }
 
 async function semanticChunkSearch(
   query: string,
-  limit: number
+  limit: number,
+  scope?: SourceScopeFilter
 ): Promise<SourceChunkMatch[]> {
   try {
     const queryEmbedding = await embed(query);
@@ -106,19 +130,21 @@ async function semanticChunkSearch(
         sourceId: sources.id,
         sourceTitle: sources.title,
         sourceType: sources.type,
+        sourceScope: sources.scope,
         content: chunks.content,
         position: chunks.position,
         score: distance,
       })
       .from(chunks)
       .innerJoin(sources, eq(chunks.sourceId, sources.id))
-      .where(isNotNull(chunks.embedding))
+      .where(and(isNotNull(chunks.embedding), buildSourceScopeFilter(scope)))
       .orderBy(distance, asc(chunks.position))
       .limit(limit * 3);
 
     return diversifyMatches(
       rows.map((row) => ({
         ...row,
+        sourceScope: normalizeSourceScope(row.sourceScope),
         score: typeof row.score === "number" ? row.score : Number(row.score),
         matchType: "semantic" as const,
       })),
@@ -132,7 +158,8 @@ async function semanticChunkSearch(
 
 async function keywordChunkSearch(
   query: string,
-  limit: number
+  limit: number,
+  scope?: SourceScopeFilter
 ): Promise<SourceChunkMatch[]> {
   const terms = extractSearchTerms(query);
 
@@ -164,19 +191,23 @@ async function keywordChunkSearch(
       sourceId: sources.id,
       sourceTitle: sources.title,
       sourceType: sources.type,
+      sourceScope: sources.scope,
       content: chunks.content,
       position: chunks.position,
       score: keywordScore,
     })
     .from(chunks)
     .innerJoin(sources, eq(chunks.sourceId, sources.id))
-    .where(and(or(...conditions), isNotNull(chunks.content)))
+    .where(
+      and(or(...conditions), isNotNull(chunks.content), buildSourceScopeFilter(scope))
+    )
     .orderBy(desc(keywordScore), asc(chunks.position))
     .limit(limit * 3);
 
   return diversifyMatches(
     rows.map((row) => ({
       ...row,
+      sourceScope: normalizeSourceScope(row.sourceScope),
       score: typeof row.score === "number" ? row.score : Number(row.score),
       matchType: "keyword" as const,
     })),
@@ -219,6 +250,22 @@ function diversifyMatches(
   }
 
   return selected;
+}
+
+function buildSourceScopeFilter(scope?: SourceScopeFilter) {
+  if (!scope) {
+    return undefined;
+  }
+
+  if (Array.isArray(scope)) {
+    return scope.length > 0 ? inArray(sources.scope, scope) : undefined;
+  }
+
+  return eq(sources.scope, scope);
+}
+
+function normalizeSourceScope(scope: string): SourceScope {
+  return scope === "personal" ? "personal" : "study";
 }
 
 export function formatRelevantSourceContext(

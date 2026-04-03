@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ingest } from "@/lib/ingestion";
+import { SOURCE_SCOPES, SourceScope } from "@/lib/db/schema";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 
@@ -8,6 +9,11 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const type = formData.get("type") as string;
     const title = formData.get("title") as string;
+    const scopeValue = formData.get("scope");
+    const scope =
+      typeof scopeValue === "string" && SOURCE_SCOPES.includes(scopeValue as SourceScope)
+        ? (scopeValue as SourceScope)
+        : "study";
 
     if (!type || !title) {
       return NextResponse.json(
@@ -32,7 +38,7 @@ export async function POST(req: NextRequest) {
       const buffer = Buffer.from(await file.arrayBuffer());
       await writeFile(filePath, buffer);
 
-      const result = await ingest({ type: "pdf", title, filePath });
+      const result = await ingest({ type: "pdf", title, filePath, scope });
       return NextResponse.json(result);
     }
 
@@ -45,7 +51,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const result = await ingest({ type: "url", title, url });
+      const result = await ingest({ type: "url", title, url, scope });
       return NextResponse.json(result);
     }
 
@@ -58,7 +64,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const result = await ingest({ type: "note", title, content });
+      const result = await ingest({ type: "note", title, content, scope });
       return NextResponse.json(result);
     }
 

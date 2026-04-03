@@ -1,5 +1,5 @@
 import { db } from "@/lib/db/client";
-import { sources, chunks } from "@/lib/db/schema";
+import { sources, chunks, SourceScope } from "@/lib/db/schema";
 import { parsePdf } from "./parsers/pdf";
 import { parseUrl } from "./parsers/url";
 import { parseMarkdown } from "./parsers/markdown";
@@ -25,6 +25,7 @@ interface IngestResult {
 export async function ingest(input: {
   type: "pdf" | "url" | "note";
   title: string;
+  scope?: SourceScope;
   filePath?: string;
   url?: string;
   content?: string;
@@ -58,6 +59,7 @@ export async function ingest(input: {
     .values({
       title: input.title,
       type: input.type,
+      scope: input.scope ?? "study",
       filePath: input.filePath || null,
       url: input.url || null,
       rawText,

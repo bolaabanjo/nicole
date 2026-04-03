@@ -10,11 +10,15 @@ import {
   vector,
 } from "drizzle-orm/pg-core";
 
+export const SOURCE_SCOPES = ["personal", "study"] as const;
+export type SourceScope = (typeof SOURCE_SCOPES)[number];
+
 // Sources: everything you ingest (PDFs, URLs, notes, videos)
 export const sources = pgTable("sources", {
   id: uuid("id").primaryKey().defaultRandom(),
   title: text("title").notNull(),
   type: text("type").notNull(), // 'pdf', 'url', 'note', 'youtube'
+  scope: text("scope").notNull().default("study"), // 'personal' | 'study'
   filePath: text("file_path"),
   url: text("url"),
   summary: text("summary"),

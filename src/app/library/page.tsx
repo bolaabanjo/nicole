@@ -6,6 +6,7 @@ interface Source {
   id: string;
   title: string;
   type: string;
+  scope: "personal" | "study";
   url: string | null;
   ingestedAt: string;
   chunkCount: number;
@@ -16,6 +17,10 @@ export default function Library() {
   const [loading, setLoading] = useState(true);
   const [ingesting, setIngesting] = useState(false);
   const [mode, setMode] = useState<"pdf" | "url" | "note">("note");
+  const [scope, setScope] = useState<"study" | "personal">("study");
+  const [scopeFilter, setScopeFilter] = useState<"all" | "study" | "personal">(
+    "all"
+  );
   const [title, setTitle] = useState("");
   const [url, setUrl] = useState("");
   const [noteContent, setNoteContent] = useState("");
@@ -23,7 +28,11 @@ export default function Library() {
 
   const fetchSources = async () => {
     try {
-      const res = await fetch("/api/sources");
+      const params =
+        scopeFilter === "all"
+          ? ""
+          : `?scope=${encodeURIComponent(scopeFilter)}`;
+      const res = await fetch(`/api/sources${params}`);
       if (res.ok) {
         const data = await res.json();
         setSources(data);
@@ -37,7 +46,7 @@ export default function Library() {
 
   useEffect(() => {
     fetchSources();
-  }, []);
+  }, [scopeFilter]);
 
   const handleIngest = async () => {
     if (!title.trim()) return;
@@ -47,6 +56,7 @@ export default function Library() {
       const formData = new FormData();
       formData.append("type", mode);
       formData.append("title", title);
+      formData.append("scope", scope);
 
       if (mode === "pdf" && fileRef.current?.files?.[0]) {
         formData.append("file", fileRef.current.files[0]);
@@ -80,7 +90,7 @@ export default function Library() {
       <div className="space-y-2">
         <h1 className="text-xl font-semibold tracking-tight">Library</h1>
         <p className="text-[var(--muted)] text-sm">
-          Everything Nicole has ingested.
+          Keep Nicole's personal context separate from study material.
         </p>
       </div>
 
@@ -103,6 +113,31 @@ export default function Library() {
               {t}
             </button>
           ))}
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs font-mono uppercase tracking-[0.2em] text-[var(--muted)]">
+            Source scope
+          </div>
+          <div className="flex gap-2">
+            {(["study", "personal"] as const).map((candidateScope) => (
+              <button
+                key={candidateScope}
+                onClick={() => setScope(candidateScope)}
+                className={`px-3 py-1 text-xs font-mono border transition-colors ${
+                  scope === candidateScope
+                    ? "border-[var(--foreground)] text-[var(--foreground)]"
+                    : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--muted)]"
+                }`}
+              >
+                {candidateScope}
+              </button>
+            ))}
+          </div>
+          <div className="text-xs text-[var(--muted)]">
+            `study` stays in the library for source-grounded work. `personal`
+            can be used in Nicole's main chat.
+          </div>
         </div>
 
         {/* Title */}
@@ -154,7 +189,24 @@ export default function Library() {
       </div>
 
       {/* Sources list */}
-      <div className="space-y-1">
+      <div className="space-y-3">
+        <div className="flex gap-2">
+          {(["all", "study", "personal"] as const).map((candidateFilter) => (
+            <button
+              key={candidateFilter}
+              onClick={() => setScopeFilter(candidateFilter)}
+              className={`px-3 py-1 text-xs font-mono border transition-colors ${
+                scopeFilter === candidateFilter
+                  ? "border-[var(--foreground)] text-[var(--foreground)]"
+                  : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--muted)]"
+              }`}
+            >
+              {candidateFilter}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-1">
         {loading && (
           <div className="text-xs text-[var(--muted)] font-mono">
             Loading...
@@ -175,12 +227,13 @@ export default function Library() {
             <div>
               <div className="text-sm">{source.title}</div>
               <div className="text-xs text-[var(--muted)] font-mono mt-1">
-                {source.type} · {source.chunkCount} chunks ·{" "}
+                {source.scope} · {source.type} · {source.chunkCount} chunks ·{" "}
                 {new Date(source.ingestedAt).toLocaleDateString()}
               </div>
             </div>
           </div>
         ))}
+        </div>
       </div>
 
       {/* Count */}
