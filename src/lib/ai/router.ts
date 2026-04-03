@@ -2,8 +2,10 @@ import { getCencoriClient } from "./cencori";
 import { ChatMessage, ChatOptions } from "./types";
 
 type ChatProvider = "cencori" | "ollama";
+type EmbedProvider = "cencori" | "none";
 
 const CHAT_PROVIDER = resolveChatProvider();
+const EMBED_PROVIDER = resolveEmbedProvider();
 const DEFAULT_CHAT_MODEL =
   CHAT_PROVIDER === "ollama" ? "qwen3.5:9b" : "llama-3.3-70b-versatile";
 const CHAT_MODEL = process.env.CHAT_MODEL || DEFAULT_CHAT_MODEL;
@@ -19,6 +21,7 @@ const OLLAMA_REQUEST_TIMEOUT_MS = Number.parseInt(
 );
 const CHAT_FALLBACK_PROVIDER =
   process.env.CHAT_FALLBACK_PROVIDER === "cencori" ? "cencori" : null;
+const BACKGROUND_AI_ENABLED = resolveBackgroundAIEnabled();
 
 /**
  * Send a chat request through the configured inference provider.
@@ -289,6 +292,12 @@ function extractStreamText(chunk: unknown): string {
  * Generate an embedding for a piece of text through Cencori.
  */
 export async function embed(text: string): Promise<number[]> {
+  if (!isEmbeddingAvailable()) {
+    throw new Error(
+      "Embeddings are not configured. Set CENCORI_API_KEY or add a local embedding provider."
+    );
+  }
+
   const response = await getCencoriClient().ai.embeddings({
     model: EMBED_MODEL,
     input: text,
@@ -312,6 +321,14 @@ export async function isOnline(): Promise<boolean> {
   }
 }
 
+export function isEmbeddingAvailable(): boolean {
+  return EMBED_PROVIDER === "cencori" && Boolean(process.env.CENCORI_API_KEY);
+}
+
+export function isBackgroundAIEnabled(): boolean {
+  return BACKGROUND_AI_ENABLED;
+}
+
 function resolveChatProvider(): ChatProvider {
   const configuredProvider = process.env.CHAT_PROVIDER?.trim().toLowerCase();
 
@@ -328,6 +345,38 @@ function resolveChatProvider(): ChatProvider {
   }
 
   return "cencori";
+}
+
+function resolveEmbedProvider(): EmbedProvider {
+  const configuredProvider = process.env.EMBED_PROVIDER?.trim().toLowerCase();
+
+  if (configuredProvider === "none") {
+    return "none";
+  }
+
+  if (configuredProvider === "cencori") {
+    return "cencori";
+  }
+
+  if (process.env.CENCORI_API_KEY) {
+    return "cencori";
+  }
+
+  return "none";
+}
+
+function resolveBackgroundAIEnabled(): boolean {
+  const configured = process.env.BACKGROUND_AI_ENABLED?.trim().toLowerCase();
+
+  if (configured === "true") {
+    return true;
+  }
+
+  if (configured === "false") {
+    return false;
+  }
+
+  return CHAT_PROVIDER !== "ollama";
 }
 
 function normalizeBaseUrl(value: string): string {

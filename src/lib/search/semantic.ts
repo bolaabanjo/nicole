@@ -1,6 +1,6 @@
 import { db } from "@/lib/db/client";
 import { chunks, sources } from "@/lib/db/schema";
-import { embed } from "@/lib/ai/router";
+import { embed, isEmbeddingAvailable } from "@/lib/ai/router";
 import {
   and,
   asc,
@@ -36,9 +36,11 @@ export async function searchRelevantSourceChunks(
 
   if (!trimmed) return [];
 
-  const semanticMatches = await semanticChunkSearch(trimmed, limit);
-  if (semanticMatches.length > 0) {
-    return semanticMatches;
+  if (isEmbeddingAvailable()) {
+    const semanticMatches = await semanticChunkSearch(trimmed, limit);
+    if (semanticMatches.length > 0) {
+      return semanticMatches;
+    }
   }
 
   return keywordChunkSearch(trimmed, limit);

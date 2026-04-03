@@ -14,7 +14,7 @@ import {
   isNotNull,
   lte,
 } from "drizzle-orm";
-import { chat, embed } from "./router";
+import { chat, embed, isBackgroundAIEnabled, isEmbeddingAvailable } from "./router";
 import { ChatMessage } from "./types";
 
 const MEMORY_EXTRACT_PROMPT = `You are Nicole's memory system. Given a conversation between Nicole and Roy, extract any new facts worth remembering long-term.
@@ -191,6 +191,7 @@ export async function extractAndStoreMemories(
   messages: ChatMessage[]
 ): Promise<void> {
   if (messages.length < 2) return;
+  if (!isBackgroundAIEnabled()) return;
 
   try {
     const conversationText = messages
@@ -331,6 +332,10 @@ export async function loadConversationSummaryContext(
  * Nicole's long-term context compact while preserving recent turn-by-turn chat.
  */
 export async function summarizeOldConversations(): Promise<void> {
+  if (!isBackgroundAIEnabled()) {
+    return;
+  }
+
   try {
     const recentMessages = await db
       .select({
@@ -416,6 +421,10 @@ export async function summarizeOldConversations(): Promise<void> {
 }
 
 async function loadRelevantMemories(query: string, limit: number) {
+  if (!isEmbeddingAvailable()) {
+    return loadTopMemories(limit);
+  }
+
   try {
     const queryEmbedding = await embed(query);
     const distance = cosineDistance(memories.embedding, queryEmbedding);
