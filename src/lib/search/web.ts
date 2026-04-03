@@ -18,6 +18,12 @@ export interface SearchResult {
   content: string;
 }
 
+export interface SearchResponse {
+  results: SearchResult[];
+  provider: "searxng" | "duckduckgo";
+  error?: string;
+}
+
 export interface PageContent {
   title: string;
   url: string;
@@ -25,42 +31,140 @@ export interface PageContent {
   wordCount: number;
 }
 
+// ---------------------------------------------------------------------------
+// Primary: SearXNG
+// ---------------------------------------------------------------------------
+
+async function searchSearXNG(
+  query: string,
+  limit: number,
+  categories: string
+): Promise<SearchResult[]> {
+  const params = new URLSearchParams({
+    q: query,
+    format: "json",
+    categories,
+  });
+
+  const res = await fetch(`${SEARXNG_URL}/search?${params}`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`SearXNG returned ${res.status}`);
+  }
+
+  const data = await res.json();
+
+  return (data.results || []).slice(0, limit).map((r: any) => ({
+    title: r.title || "",
+    url: r.url || "",
+    content: r.content || "",
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Fallback: DuckDuckGo HTML (no API key needed)
+// ---------------------------------------------------------------------------
+
+async function searchDuckDuckGo(
+  query: string,
+  limit: number
+): Promise<SearchResult[]> {
+  const params = new URLSearchParams({ q: query });
+
+  const res = await fetch(`https://html.duckduckgo.com/html/?${params}`, {
+    signal: AbortSignal.timeout(10_000),
+    headers: {
+      ...FETCH_HEADERS,
+      Accept: "text/html",
+    },
+    redirect: "follow",
+  });
+
+  if (!res.ok) {
+    throw new Error(`DuckDuckGo returned ${res.status}`);
+  }
+
+  const html = await res.text();
+  const results: SearchResult[] = [];
+
+  // Parse DDG HTML results — each result lives in a .result class
+  const resultBlocks = html.split(/class="result\s/);
+
+  for (let i = 1; i < resultBlocks.length && results.length < limit; i++) {
+    const block = resultBlocks[i];
+
+    // Extract title and URL from the result link
+    const linkMatch = block.match(
+      /class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/
+    );
+    if (!linkMatch) continue;
+
+    let url = linkMatch[1];
+    const title = linkMatch[2].replace(/<[^>]+>/g, "").trim();
+
+    // DDG wraps URLs in a redirect — extract the actual URL
+    const uddgMatch = url.match(/[?&]uddg=([^&]+)/);
+    if (uddgMatch) {
+      url = decodeURIComponent(uddgMatch[1]);
+    }
+
+    // Extract snippet
+    const snippetMatch = block.match(
+      /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/
+    );
+    const content = snippetMatch
+      ? snippetMatch[1].replace(/<[^>]+>/g, "").trim()
+      : "";
+
+    if (url && title) {
+      results.push({ title, url, content });
+    }
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Public search API: SearXNG → DuckDuckGo fallback
+// ---------------------------------------------------------------------------
+
 /**
- * Search the web via local SearXNG instance.
+ * Search the web. Tries SearXNG first, falls back to DuckDuckGo if unavailable.
  */
 export async function searchWeb(
   query: string,
   limit = 5,
   categories = "general"
-): Promise<SearchResult[]> {
+): Promise<SearchResponse> {
+  // Try SearXNG first
   try {
-    const params = new URLSearchParams({
-      q: query,
-      format: "json",
-      categories,
-    });
-
-    const res = await fetch(`${SEARXNG_URL}/search?${params}`, {
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!res.ok) {
-      console.error(`SearXNG error: ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-
-    return (data.results || []).slice(0, limit).map((r: any) => ({
-      title: r.title || "",
-      url: r.url || "",
-      content: r.content || "",
-    }));
+    const results = await searchSearXNG(query, limit, categories);
+    return { results, provider: "searxng" };
   } catch (error) {
-    console.error("Web search failed:", error);
-    return [];
+    console.error("SearXNG failed, trying DuckDuckGo:", error);
   }
+
+  // Fallback to DuckDuckGo
+  try {
+    const results = await searchDuckDuckGo(query, limit);
+    return { results, provider: "duckduckgo" };
+  } catch (error) {
+    console.error("DuckDuckGo fallback also failed:", error);
+  }
+
+  // Both failed
+  return {
+    results: [],
+    provider: "searxng",
+    error: "Web search is unavailable right now. Both SearXNG and DuckDuckGo failed to respond.",
+  };
 }
+
+// ---------------------------------------------------------------------------
+// Page content extraction
+// ---------------------------------------------------------------------------
 
 /**
  * Fetch a URL and extract readable content using Mozilla Readability.

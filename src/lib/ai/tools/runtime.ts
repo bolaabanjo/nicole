@@ -192,8 +192,11 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   web_search: async (input) => {
     const query = readRequiredString(input, "query");
     const limit = readOptionalNumber(input, "limit", 5, 1, 10);
-    const results = await searchWeb(query, limit);
-    return { results };
+    const response = await searchWeb(query, limit);
+    if (response.error) {
+      throw new Error(response.error);
+    }
+    return { results: response.results, provider: response.provider };
   },
   web_open: async (input) => {
     const url = readRequiredString(input, "url");

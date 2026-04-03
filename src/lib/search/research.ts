@@ -59,10 +59,10 @@ export async function deepResearch(
     progress.status = "searching";
     report();
 
-    const results = await searchWeb(q, 10);
-    progress.pagesSearched += results.length;
+    const response = await searchWeb(q, 10);
+    progress.pagesSearched += response.results.length;
 
-    for (const r of results) {
+    for (const r of response.results) {
       if (!allUrls.has(r.url)) {
         allUrls.add(r.url);
         allResults.push({ title: r.title, url: r.url });
