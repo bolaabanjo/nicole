@@ -185,7 +185,7 @@ final class ChatViewModel: ObservableObject {
     } catch {
       replaceAssistantPlaceholder(
         id: assistantID,
-        content: "I'm Unavailable Right Now"
+        content: "I'm unavailable right now."
       )
       errorText = error.localizedDescription
       connectionState = .failed(error.localizedDescription)
