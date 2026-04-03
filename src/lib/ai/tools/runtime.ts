@@ -1,11 +1,14 @@
-import { desc, eq, count } from "drizzle-orm";
+import { spawn } from "node:child_process";
+import { and, asc, count, desc, eq, gte, lte } from "drizzle-orm";
 import { chat } from "@/lib/ai/router";
 import { searchRelevantMemories, storeMemory } from "@/lib/ai/memory";
 import { ChatMessage } from "@/lib/ai/types";
 import { db } from "@/lib/db/client";
 import {
+  calendarEvents,
   chunks,
   notes,
+  reminders,
   sources,
   toolInvocations,
 } from "@/lib/db/schema";
@@ -54,6 +57,7 @@ interface RunToolLoopResult {
 
 const MAX_TOOL_STEPS = 3;
 const TOOL_PLANNING_ENABLED = resolveToolPlanningEnabled();
+const TOOL_REPO_ROOT = process.cwd();
 const CASUAL_TOOL_BYPASS_PATTERNS = [
   /^hi[.!?]*$/i,
   /^hey[.!?]*$/i,
@@ -63,6 +67,43 @@ const CASUAL_TOOL_BYPASS_PATTERNS = [
   /^what'?s up[.!?]*$/i,
   /^how are you[.!?]*$/i,
 ];
+const DIRECT_TOOL_COMMAND_PATTERNS = [
+  /\bremind me to\b/i,
+  /\bset a reminder\b/i,
+  /\bcreate a reminder\b/i,
+  /\bwhat'?s on my calendar\b/i,
+  /\bcheck my calendar\b/i,
+  /\bmy schedule\b/i,
+  /\bfree time\b/i,
+  /\bavailability\b/i,
+  /\bschedule\b/i,
+  /\bcreate (?:an )?event\b/i,
+  /\badd .* to (?:my )?calendar\b/i,
+  /\bgit status\b/i,
+  /\brepo status\b/i,
+  /\bwhat changed in (?:the )?repo\b/i,
+  /\brun [`'"]/i,
+  /\bexecute [`'"]/i,
+];
+const BLOCKED_COMMAND_PATTERN = /[;&|><`$()]/;
+const ALLOWED_TERMINAL_PREFIXES = [
+  ["git", "status"],
+  ["git", "diff"],
+  ["git", "log"],
+  ["rg"],
+  ["ls"],
+  ["dir"],
+  ["pwd"],
+  ["Get-Location"],
+  ["cat"],
+  ["type"],
+  ["sed"],
+  ["npm", "run", "build"],
+  ["npm", "run", "lint"],
+  ["npm", "test"],
+];
+const TERMINAL_TIMEOUT_MS = 15_000;
+const MAX_TERMINAL_OUTPUT_CHARS = 12_000;
 
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   tool_registry_list: async () => ({
@@ -210,6 +251,140 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
     return { note: updated[0] };
   },
+  calendar_read: async (input) => {
+    const start = coerceDateTime(readOptionalString(input, "start")) ?? new Date();
+    const end =
+      coerceDateTime(readOptionalString(input, "end")) ??
+      new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const limit = readOptionalNumber(input, "limit", 12, 1, 30);
+
+    const events = await db
+      .select({
+        id: calendarEvents.id,
+        title: calendarEvents.title,
+        description: calendarEvents.description,
+        location: calendarEvents.location,
+        startAt: calendarEvents.startAt,
+        endAt: calendarEvents.endAt,
+        source: calendarEvents.source,
+      })
+      .from(calendarEvents)
+      .where(
+        and(gte(calendarEvents.startAt, start), lte(calendarEvents.startAt, end))
+      )
+      .orderBy(asc(calendarEvents.startAt))
+      .limit(limit);
+
+    return {
+      window: {
+        start: start.toISOString(),
+        end: end.toISOString(),
+      },
+      events,
+      availability: summarizeAvailability(start, end, events),
+    };
+  },
+  calendar_create_event: async (input) => {
+    const title = readRequiredString(input, "title");
+    const start = coerceDateTime(readRequiredString(input, "start"));
+    const end = coerceDateTime(readRequiredString(input, "end"));
+    const description = readOptionalString(input, "description");
+    const location = readOptionalString(input, "location");
+
+    if (!start || !end) {
+      throw new Error("Event start and end must be valid date-time values.");
+    }
+
+    if (end <= start) {
+      throw new Error("Event end must be after the start time.");
+    }
+
+    const conflicts = await db
+      .select({
+        id: calendarEvents.id,
+        title: calendarEvents.title,
+        startAt: calendarEvents.startAt,
+        endAt: calendarEvents.endAt,
+      })
+      .from(calendarEvents)
+      .where(
+        and(lte(calendarEvents.startAt, end), gte(calendarEvents.endAt, start))
+      )
+      .orderBy(asc(calendarEvents.startAt))
+      .limit(10);
+
+    const created = await db
+      .insert(calendarEvents)
+      .values({
+        title,
+        description: description || null,
+        location: location || null,
+        startAt: start,
+        endAt: end,
+        source: "nicole",
+        updatedAt: new Date(),
+      })
+      .returning({
+        id: calendarEvents.id,
+        title: calendarEvents.title,
+        description: calendarEvents.description,
+        location: calendarEvents.location,
+        startAt: calendarEvents.startAt,
+        endAt: calendarEvents.endAt,
+        source: calendarEvents.source,
+        createdAt: calendarEvents.createdAt,
+      });
+
+    return {
+      event: created[0],
+      conflicts,
+    };
+  },
+  reminder_create: async (input) => {
+    const title = readRequiredString(input, "title");
+    const dueAtRaw = readOptionalString(input, "dueAt");
+    const notesText = readOptionalString(input, "notes");
+    const dueAt = dueAtRaw ? coerceDateTime(dueAtRaw) : null;
+
+    if (dueAtRaw && !dueAt) {
+      throw new Error(
+        `Reminder due time could not be parsed: ${dueAtRaw}. Use a clearer time like "tomorrow at 5pm" or an ISO timestamp.`
+      );
+    }
+
+    const created = await db
+      .insert(reminders)
+      .values({
+        title,
+        notes: notesText || null,
+        dueAt: dueAt || null,
+        status: "pending",
+        updatedAt: new Date(),
+      })
+      .returning({
+        id: reminders.id,
+        title: reminders.title,
+        notes: reminders.notes,
+        dueAt: reminders.dueAt,
+        status: reminders.status,
+        createdAt: reminders.createdAt,
+      });
+
+    return { reminder: created[0] };
+  },
+  terminal_run: async (input) => {
+    const command = readRequiredString(input, "command");
+    const result = await runControlledTerminalCommand(command);
+    return result;
+  },
+  git_status: async () => {
+    const status = await runControlledTerminalCommand("git status --short --branch");
+    const diff = await runControlledTerminalCommand("git diff --stat");
+    return {
+      status,
+      diff,
+    };
+  },
 };
 
 export function getToolCatalog(): ToolDefinition[] {
@@ -252,6 +427,18 @@ Available tools:
 ${manifest}`;
 }
 
+export async function runDirectToolRouting(
+  message: string
+): Promise<ToolExecutionResult[]> {
+  const directToolCall = detectDirectToolCall(message);
+
+  if (!directToolCall) {
+    return [];
+  }
+
+  return [await executeToolCall(directToolCall)];
+}
+
 export function shouldAttemptToolUse(message: string): boolean {
   if (!TOOL_PLANNING_ENABLED) {
     return false;
@@ -265,6 +452,10 @@ export function shouldAttemptToolUse(message: string): boolean {
 
   if (CASUAL_TOOL_BYPASS_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return false;
+  }
+
+  if (DIRECT_TOOL_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
   }
 
   return /\b(search|look up|lookup|latest|current|research|find out|web|source|sources|library|pdf|document|notes?|remember|save this|store this|list tools|what can you do|create note|update note)\b/.test(
@@ -442,6 +633,625 @@ export async function executeToolCall(
     await logToolInvocation(tool, result);
     return result;
   }
+}
+
+function detectDirectToolCall(message: string): ToolCall | null {
+  const trimmed = message.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  return (
+    parseReminderToolCall(trimmed) ||
+    parseCalendarCreateToolCall(trimmed) ||
+    parseCalendarReadToolCall(trimmed) ||
+    parseGitStatusToolCall(trimmed) ||
+    parseTerminalToolCall(trimmed) ||
+    parseToolRegistryCall(trimmed)
+  );
+}
+
+function parseToolRegistryCall(message: string): ToolCall | null {
+  if (
+    /\b(list tools|what tools can you use|what can you do|show tools|tool registry)\b/i.test(
+      message
+    )
+  ) {
+    return { name: "tool_registry_list", arguments: {} };
+  }
+
+  return null;
+}
+
+function parseCalendarReadToolCall(message: string): ToolCall | null {
+  if (
+    /\bwhat'?s on my calendar\b/i.test(message) ||
+    /\bcheck my calendar\b/i.test(message) ||
+    /\bshow my calendar\b/i.test(message) ||
+    /\bmy schedule\b/i.test(message) ||
+    /\bupcoming events\b/i.test(message) ||
+    /\bfree time\b/i.test(message) ||
+    /\bavailability\b/i.test(message) ||
+    /\bam i free\b/i.test(message)
+  ) {
+    const range = extractCalendarRange(message);
+    return {
+      name: "calendar_read",
+      arguments: range,
+    };
+  }
+
+  return null;
+}
+
+function parseCalendarCreateToolCall(message: string): ToolCall | null {
+  const addMatch = message.match(
+    /^(?:add|put)\s+(.+?)\s+to\s+(?:my\s+)?calendar(?:\s+(.*))?$/i
+  );
+
+  if (addMatch) {
+    const parsed = buildCalendarEventArguments(
+      addMatch[1],
+      addMatch[2] || ""
+    );
+    return parsed
+      ? { name: "calendar_create_event", arguments: parsed }
+      : null;
+  }
+
+  const scheduleMatch = message.match(
+    /^(?:schedule|book|create(?:\s+an?)?\s+event(?:\s+called)?)(?:\s+me)?\s+(.+)$/i
+  );
+
+  if (scheduleMatch) {
+    const parsed = buildCalendarEventArguments(scheduleMatch[1]);
+    return parsed
+      ? { name: "calendar_create_event", arguments: parsed }
+      : null;
+  }
+
+  return null;
+}
+
+function buildCalendarEventArguments(
+  primary: string,
+  trailing = ""
+): Record<string, unknown> | null {
+  const raw = `${primary} ${trailing}`.trim();
+  if (!raw) {
+    return null;
+  }
+
+  const fromToMatch = raw.match(/^(.*?)\s+from\s+(.+?)\s+to\s+(.+)$/i);
+  if (fromToMatch) {
+    const title = cleanEventTitle(fromToMatch[1]);
+    const start = coerceDateTime(fromToMatch[2]);
+    const end = coerceDateTime(fromToMatch[3]);
+
+    if (title && start && end) {
+      return {
+        title,
+        start: start.toISOString(),
+        end: end.toISOString(),
+      };
+    }
+
+    return null;
+  }
+
+  const split = splitTextAndDatePhrase(raw);
+  if (!split?.title || !split.datePhrase) {
+    return null;
+  }
+
+  const start = coerceDateTime(split.datePhrase);
+  if (!start) {
+    return null;
+  }
+
+  const duration = parseDurationMs(split.durationPhrase) ?? 60 * 60 * 1000;
+  const end = new Date(start.getTime() + duration);
+
+  return {
+    title: cleanEventTitle(split.title),
+    start: start.toISOString(),
+    end: end.toISOString(),
+  };
+}
+
+function cleanEventTitle(value: string): string {
+  return value
+    .replace(/\b(?:for|on|at|today|tomorrow|tonight)\b.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseReminderToolCall(message: string): ToolCall | null {
+  const match = message.match(
+    /^(?:remind me to|set a reminder(?: to)?|create a reminder(?: to)?|make a reminder(?: to)?)\s+(.+)$/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const split = splitTextAndDatePhrase(match[1]);
+  const title = split?.title || match[1];
+  const dueAt = split?.datePhrase ? coerceDateTime(split.datePhrase) : null;
+
+  return {
+    name: "reminder_create",
+    arguments: {
+      title: title.trim(),
+      ...(dueAt ? { dueAt: dueAt.toISOString() } : {}),
+    },
+  };
+}
+
+function parseGitStatusToolCall(message: string): ToolCall | null {
+  if (
+    /\bgit status\b/i.test(message) ||
+    /\brepo status\b/i.test(message) ||
+    /\bworking tree\b/i.test(message) ||
+    /\bwhat changed in (?:the )?repo\b/i.test(message) ||
+    /\bwhat's the repo status\b/i.test(message)
+  ) {
+    return {
+      name: "git_status",
+      arguments: {},
+    };
+  }
+
+  return null;
+}
+
+function parseTerminalToolCall(message: string): ToolCall | null {
+  const quoted =
+    message.match(/`([^`]+)`/) ||
+    message.match(/"([^"]+)"/) ||
+    message.match(/'([^']+)'/);
+
+  if (
+    quoted &&
+    /\b(?:run|execute|try|check|inspect)\b/i.test(message) &&
+    isAllowedTerminalCommand(quoted[1].trim())
+  ) {
+    return {
+      name: "terminal_run",
+      arguments: { command: quoted[1].trim() },
+    };
+  }
+
+  const runMatch = message.match(/^(?:run|execute)\s+(.+)$/i);
+  if (runMatch && isAllowedTerminalCommand(runMatch[1].trim())) {
+    return {
+      name: "terminal_run",
+      arguments: { command: runMatch[1].trim() },
+    };
+  }
+
+  return null;
+}
+
+function splitTextAndDatePhrase(value: string): {
+  title: string;
+  datePhrase: string | null;
+  durationPhrase: string | null;
+} | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const datePattern =
+    /\b(today|tomorrow|tonight|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|on\s+\d{4}-\d{2}-\d{2}(?:\s+at\s+[^]+?)?|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|in\s+\d+\s+(?:minute|minutes|hour|hours|day|days|week|weeks))\b/i;
+  const match = datePattern.exec(trimmed);
+
+  if (!match || match.index < 0) {
+    return {
+      title: trimmed,
+      datePhrase: null,
+      durationPhrase: null,
+    };
+  }
+
+  const title = trimmed.slice(0, match.index).trim();
+  const remainder = trimmed.slice(match.index).trim();
+  const durationMatch = remainder.match(/\bfor\s+(.+)$/i);
+  const datePhrase = durationMatch
+    ? remainder.slice(0, durationMatch.index).trim()
+    : remainder;
+
+  return {
+    title,
+    datePhrase,
+    durationPhrase: durationMatch?.[1]?.trim() || null,
+  };
+}
+
+function extractCalendarRange(
+  message: string
+): Record<string, unknown> {
+  const lower = message.toLowerCase();
+  const today = new Date();
+
+  if (lower.includes("today")) {
+    return {
+      start: startOfDay(today).toISOString(),
+      end: endOfDay(today).toISOString(),
+    };
+  }
+
+  if (lower.includes("tomorrow")) {
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return {
+      start: startOfDay(tomorrow).toISOString(),
+      end: endOfDay(tomorrow).toISOString(),
+    };
+  }
+
+  if (lower.includes("next week")) {
+    const nextWeekStart = startOfWeek(today);
+    nextWeekStart.setDate(nextWeekStart.getDate() + 7);
+    const nextWeekEnd = new Date(nextWeekStart);
+    nextWeekEnd.setDate(nextWeekEnd.getDate() + 7);
+    return {
+      start: nextWeekStart.toISOString(),
+      end: nextWeekEnd.toISOString(),
+    };
+  }
+
+  return {};
+}
+
+function startOfDay(date: Date): Date {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function endOfDay(date: Date): Date {
+  const result = new Date(date);
+  result.setHours(23, 59, 59, 999);
+  return result;
+}
+
+function startOfWeek(date: Date): Date {
+  const result = startOfDay(date);
+  const day = result.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  result.setDate(result.getDate() + diff);
+  return result;
+}
+
+function coerceDateTime(value: string | null): Date | null {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Date.parse(trimmed);
+  if (!Number.isNaN(parsed)) {
+    return new Date(parsed);
+  }
+
+  const normalized = trimmed.toLowerCase().replace(/,/g, "");
+  const now = new Date();
+
+  const relativeMatch = normalized.match(
+    /^in\s+(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)$/
+  );
+  if (relativeMatch) {
+    const amount = Number.parseInt(relativeMatch[1], 10);
+    const unit = relativeMatch[2];
+    const date = new Date(now);
+
+    if (unit.startsWith("minute")) {
+      date.setMinutes(date.getMinutes() + amount);
+    } else if (unit.startsWith("hour")) {
+      date.setHours(date.getHours() + amount);
+    } else if (unit.startsWith("day")) {
+      date.setDate(date.getDate() + amount);
+    } else {
+      date.setDate(date.getDate() + amount * 7);
+    }
+
+    return date;
+  }
+
+  const dayMatch = normalized.match(
+    /^(today|tomorrow|tonight)(?:\s+at\s+(.+))?$/
+  );
+  if (dayMatch) {
+    const date = startOfDay(now);
+
+    if (dayMatch[1] === "tomorrow") {
+      date.setDate(date.getDate() + 1);
+    }
+
+    if (dayMatch[1] === "tonight" && !dayMatch[2]) {
+      date.setHours(20, 0, 0, 0);
+      return date;
+    }
+
+    const time = parseClockTime(dayMatch[2]);
+    applyClockTime(date, time);
+    return date;
+  }
+
+  const weekdayMatch = normalized.match(
+    /^(?:next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at\s+(.+))?$/
+  );
+  if (weekdayMatch) {
+    const target = weekdayToNumber(weekdayMatch[1]);
+    if (target === null) {
+      return null;
+    }
+
+    const date = startOfDay(now);
+    let delta = target - date.getDay();
+    if (delta <= 0 || normalized.startsWith("next ")) {
+      delta += 7;
+    }
+    date.setDate(date.getDate() + delta);
+    applyClockTime(date, parseClockTime(weekdayMatch[2]));
+    return date;
+  }
+
+  const onDateMatch = normalized.match(
+    /^(?:on\s+)?(\d{4}-\d{2}-\d{2})(?:\s+at\s+(.+))?$/
+  );
+  if (onDateMatch) {
+    const date = new Date(`${onDateMatch[1]}T09:00:00`);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    applyClockTime(date, parseClockTime(onDateMatch[2]));
+    return date;
+  }
+
+  const timeOnlyMatch = normalized.match(
+    /^(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/
+  );
+  if (timeOnlyMatch) {
+    const date = new Date(now);
+    applyClockTime(date, parseClockTime(timeOnlyMatch[1]));
+    return date;
+  }
+
+  return null;
+}
+
+function parseClockTime(
+  value: string | undefined
+): { hours: number; minutes: number } | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "noon") {
+    return { hours: 12, minutes: 0 };
+  }
+
+  if (normalized === "midnight") {
+    return { hours: 0, minutes: 0 };
+  }
+
+  if (normalized === "morning") {
+    return { hours: 9, minutes: 0 };
+  }
+
+  if (normalized === "afternoon") {
+    return { hours: 15, minutes: 0 };
+  }
+
+  if (normalized === "evening") {
+    return { hours: 19, minutes: 0 };
+  }
+
+  const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!match) {
+    return null;
+  }
+
+  let hours = Number.parseInt(match[1], 10);
+  const minutes = Number.parseInt(match[2] || "0", 10);
+  const meridiem = match[3];
+
+  if (meridiem === "pm" && hours < 12) {
+    hours += 12;
+  }
+
+  if (meridiem === "am" && hours === 12) {
+    hours = 0;
+  }
+
+  if (hours > 23 || minutes > 59) {
+    return null;
+  }
+
+  return { hours, minutes };
+}
+
+function applyClockTime(
+  date: Date,
+  time: { hours: number; minutes: number } | null
+): void {
+  if (!time) {
+    date.setHours(9, 0, 0, 0);
+    return;
+  }
+
+  date.setHours(time.hours, time.minutes, 0, 0);
+}
+
+function weekdayToNumber(value: string): number | null {
+  const days = [
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+  ];
+  const index = days.indexOf(value.toLowerCase());
+  return index >= 0 ? index : null;
+}
+
+function parseDurationMs(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.toLowerCase();
+  let total = 0;
+  const matches = normalized.matchAll(
+    /(\d+)\s*(minute|minutes|hour|hours|day|days)/g
+  );
+
+  for (const match of matches) {
+    const amount = Number.parseInt(match[1], 10);
+    const unit = match[2];
+
+    if (unit.startsWith("minute")) {
+      total += amount * 60 * 1000;
+    } else if (unit.startsWith("hour")) {
+      total += amount * 60 * 60 * 1000;
+    } else {
+      total += amount * 24 * 60 * 60 * 1000;
+    }
+  }
+
+  return total > 0 ? total : null;
+}
+
+function summarizeAvailability(
+  start: Date,
+  end: Date,
+  events: Array<{
+    title: string;
+    startAt: Date;
+    endAt: Date;
+  }>
+) {
+  const now = new Date();
+  const isBusyNow = events.some(
+    (event) => event.startAt <= now && event.endAt >= now
+  );
+  const nextEvent = events.find((event) => event.startAt >= now) || null;
+
+  return {
+    isBusyNow,
+    nextEvent,
+    totalEvents: events.length,
+    windowHours: Math.round((end.getTime() - start.getTime()) / 36e5),
+  };
+}
+
+async function runControlledTerminalCommand(command: string) {
+  const trimmed = command.trim();
+
+  if (!trimmed) {
+    throw new Error("Command cannot be empty.");
+  }
+
+  if (BLOCKED_COMMAND_PATTERN.test(trimmed)) {
+    throw new Error(
+      "Blocked shell characters detected. Use a simple read-only command without chaining or redirection."
+    );
+  }
+
+  if (!isAllowedTerminalCommand(trimmed)) {
+    throw new Error(
+      "That command is outside Nicole's current safe command set. Right now she can inspect git state, search files, print files, and run repo checks like npm run build/lint/test."
+    );
+  }
+
+  return new Promise<{
+    command: string;
+    cwd: string;
+    stdout: string;
+    stderr: string;
+    exitCode: number | null;
+  }>((resolve, reject) => {
+    const shellCommand =
+      process.platform === "win32" ? "powershell.exe" : "/bin/zsh";
+    const shellArgs =
+      process.platform === "win32"
+        ? ["-NoProfile", "-Command", trimmed]
+        : ["-lc", trimmed];
+
+    const child = spawn(shellCommand, shellArgs, {
+      cwd: TOOL_REPO_ROOT,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+
+    const timeout = setTimeout(() => {
+      if (!finished) {
+        child.kill();
+      }
+    }, TERMINAL_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      stdout = truncateOutput(`${stdout}${String(chunk)}`);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr = truncateOutput(`${stderr}${String(chunk)}`);
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      finished = true;
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      finished = true;
+      resolve({
+        command: trimmed,
+        cwd: TOOL_REPO_ROOT,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        exitCode: code,
+      });
+    });
+  });
+}
+
+function isAllowedTerminalCommand(command: string): boolean {
+  const trimmed = command.trim();
+
+  return ALLOWED_TERMINAL_PREFIXES.some((prefixParts) => {
+    const prefix = prefixParts.join(" ");
+    return trimmed === prefix || trimmed.startsWith(`${prefix} `);
+  });
+}
+
+function truncateOutput(value: string): string {
+  if (value.length <= MAX_TERMINAL_OUTPUT_CHARS) {
+    return value;
+  }
+
+  return `${value.slice(0, MAX_TERMINAL_OUTPUT_CHARS)}\n...[truncated]`;
 }
 
 function formatToolResultForPlanning(result: ToolExecutionResult): string {

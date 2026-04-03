@@ -139,4 +139,31 @@ actor WorkspaceSnapshotStore {
       isStale: isStale
     )
   }
+
+  func waitForVisibleContent(
+    target: WorkspaceCaptureTarget,
+    timeoutNanoseconds: UInt64 = 450_000_000,
+    pollIntervalNanoseconds: UInt64 = 40_000_000
+  ) async -> NicoleWorkspaceContextPayload? {
+    let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+      guard let snapshot, snapshot.target == target else {
+        return nil
+      }
+
+      if let visibleContent = snapshot.payload.visibleContent,
+         !visibleContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return currentSnapshot(maxAge: .greatestFiniteMagnitude).payload
+      }
+
+      try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+    }
+
+    guard let snapshot, snapshot.target == target else {
+      return nil
+    }
+
+    return currentSnapshot(maxAge: .greatestFiniteMagnitude).payload
+  }
 }

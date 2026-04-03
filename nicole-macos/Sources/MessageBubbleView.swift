@@ -80,7 +80,7 @@ struct MessageBubbleView: View {
         }
       }
         .padding(.horizontal, message.role == .user ? 16 : 0)
-        .padding(.vertical, message.role == .user ? 12 : 8)
+        .padding(.vertical, message.role == .user ? 8 : 4)
         .background(message.role == .user ? Color.white : Color.clear)
         .clipShape(
           .rect(

@@ -17,6 +17,7 @@ import {
 } from "@/lib/ai/memory";
 import {
   formatToolResultsForPrompt,
+  runDirectToolRouting,
   runToolPlanningLoop,
   shouldAttemptToolUse,
 } from "@/lib/ai/tools";
@@ -51,21 +52,25 @@ export async function POST(req: NextRequest) {
     });
 
     let fullSystemPrompt = systemPrompt;
-    if (shouldAttemptToolUse(message)) {
+    const toolResults = await runDirectToolRouting(message);
+
+    if (toolResults.length === 0 && shouldAttemptToolUse(message)) {
       try {
         const toolPlan = await runToolPlanningLoop({
           systemPrompt,
           recentMessages,
           userMessage: message,
         });
-        const toolContext = formatToolResultsForPrompt(toolPlan.toolResults);
-
-        if (toolContext) {
-          fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. Use these results naturally in the reply. Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
-        }
+        toolResults.push(...toolPlan.toolResults);
       } catch (error) {
         console.error("Tool planning failed, continuing without tools:", error);
       }
+    }
+
+    const toolContext = formatToolResultsForPrompt(toolResults);
+
+    if (toolContext) {
+      fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. Use these results naturally in the reply. Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
     }
 
     const fullMessages: ChatMessage[] = [

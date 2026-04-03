@@ -14,6 +14,10 @@ final class CompactWindowManager: ObservableObject {
 
   private init() {}
 
+  var isPanelVisible: Bool {
+    panel?.isVisible ?? false
+  }
+
   func setup(settings: AppSettings, viewModel: ChatViewModel) {
     if panel == nil {
       let newPanel = KeyableCompactPanel(

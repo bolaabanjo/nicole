@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -54,6 +55,20 @@ enum WorkspaceContextProvider {
     }
 
     if let payload = cached.payload {
+      let hasVisibleContent =
+        payload.visibleContent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+
+      if !hasVisibleContent,
+         let target = cached.target,
+         CGPreflightScreenCaptureAccess()
+      {
+        if let awaited = await WorkspaceSnapshotStore.shared.waitForVisibleContent(
+          target: target
+        ) {
+          return awaited
+        }
+      }
+
       return payload
     }
 

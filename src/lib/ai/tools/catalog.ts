@@ -412,8 +412,15 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "read",
     requiresConfirmation: false,
     availability: "hybrid",
-    status: "planned",
-    inputSchema: emptySchema,
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start: { type: "string", description: "Optional range start." },
+        end: { type: "string", description: "Optional range end." },
+        limit: { type: "number", description: "Maximum number of events to return." },
+      },
+    },
     outputDescription: "Returns upcoming events and availability.",
   }),
   defineTool({
@@ -425,13 +432,15 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "write",
     requiresConfirmation: true,
     availability: "hybrid",
-    status: "planned",
+    status: "ready",
     inputSchema: {
       type: "object",
       properties: {
         title: { type: "string", description: "Event title." },
         start: { type: "string", description: "Start time." },
         end: { type: "string", description: "End time." },
+        description: { type: "string", description: "Optional event description." },
+        location: { type: "string", description: "Optional event location." },
       },
       required: ["title", "start", "end"],
     },
@@ -446,12 +455,13 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "write",
     requiresConfirmation: true,
     availability: "hybrid",
-    status: "planned",
+    status: "ready",
     inputSchema: {
       type: "object",
       properties: {
         title: { type: "string", description: "Reminder text." },
         dueAt: { type: "string", description: "Optional due time." },
+        notes: { type: "string", description: "Optional reminder notes." },
       },
       required: ["title"],
     },
@@ -591,7 +601,7 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "actuate",
     requiresConfirmation: true,
     availability: "local",
-    status: "planned",
+    status: "ready",
     inputSchema: {
       type: "object",
       properties: {
@@ -610,7 +620,7 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "read",
     requiresConfirmation: false,
     availability: "local",
-    status: "planned",
+    status: "ready",
     inputSchema: emptySchema,
     outputDescription: "Returns git status information.",
   }),

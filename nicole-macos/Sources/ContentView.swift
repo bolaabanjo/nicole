@@ -201,10 +201,6 @@ struct ContentView: View {
             )
         )
 
-        Text("Powered by Cencori")
-          .font(.system(size: 10, weight: .medium))
-          .foregroundStyle(Color.white.opacity(0.24))
-          .padding(.bottom, 4)
       }
       .frame(maxWidth: maxContentWidth)
       .padding(.horizontal, 20)

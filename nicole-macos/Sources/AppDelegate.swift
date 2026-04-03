@@ -24,8 +24,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func toggleNicolePanel() {
     Task { @MainActor in
+      let wasHidden = !CompactWindowManager.shared.isPanelVisible
       await WorkspaceContextProvider.captureExternalContext()
       CompactWindowManager.shared.togglePanel()
+
+      if wasHidden {
+        ScreenCapturePermissionManager.requestIfNeeded()
+      }
     }
   }
 

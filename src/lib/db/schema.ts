@@ -177,6 +177,30 @@ export const toolInvocations = pgTable("tool_invocations", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Calendar events: Nicole's local scheduling store
+export const calendarEvents = pgTable("calendar_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  title: text("title").notNull(),
+  description: text("description"),
+  location: text("location"),
+  startAt: timestamp("start_at").notNull(),
+  endAt: timestamp("end_at").notNull(),
+  source: text("source").default("nicole"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Reminders: lightweight task/reminder store for Nicole
+export const reminders = pgTable("reminders", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  title: text("title").notNull(),
+  notes: text("notes"),
+  dueAt: timestamp("due_at"),
+  status: text("status").default("pending"), // 'pending' | 'completed' | 'cancelled'
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 // Notes / writing drafts
 export const notes = pgTable("notes", {
   id: uuid("id").primaryKey().defaultRandom(),
