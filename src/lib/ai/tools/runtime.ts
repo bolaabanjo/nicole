@@ -53,6 +53,7 @@ interface RunToolLoopResult {
 }
 
 const MAX_TOOL_STEPS = 3;
+const TOOL_PLANNING_ENABLED = resolveToolPlanningEnabled();
 const CASUAL_TOOL_BYPASS_PATTERNS = [
   /^hi[.!?]*$/i,
   /^hey[.!?]*$/i,
@@ -250,6 +251,10 @@ ${manifest}`;
 }
 
 export function shouldAttemptToolUse(message: string): boolean {
+  if (!TOOL_PLANNING_ENABLED) {
+    return false;
+  }
+
   const normalized = message.trim().toLowerCase();
 
   if (!normalized) {
@@ -271,7 +276,7 @@ export async function runToolPlanningLoop(
   const toolResults: ToolExecutionResult[] = [];
   const toolMessages: ChatMessage[] = [];
 
-  if (getReadyTools().length === 0) {
+  if (!TOOL_PLANNING_ENABLED || getReadyTools().length === 0) {
     return { toolResults, usedTools: [] };
   }
 
@@ -286,12 +291,20 @@ export async function runToolPlanningLoop(
       { role: "user", content: options.userMessage },
     ];
 
-    const decision = await chat(decisionMessages, {
-      temperature: 0,
-      maxTokens: 400,
-    });
-    const decisionText =
-      typeof decision === "string" ? decision.trim() : String(decision).trim();
+    let decisionText = "";
+
+    try {
+      const decision = await chat(decisionMessages, {
+        temperature: 0,
+        maxTokens: 400,
+      });
+      decisionText =
+        typeof decision === "string" ? decision.trim() : String(decision).trim();
+    } catch (error) {
+      console.error("Tool planning failed:", error);
+      break;
+    }
+
     const toolCall = parseToolCall(decisionText);
 
     if (!toolCall) {
@@ -312,6 +325,20 @@ export async function runToolPlanningLoop(
     toolResults,
     usedTools: Array.from(new Set(toolResults.map((result) => result.name))),
   };
+}
+
+function resolveToolPlanningEnabled(): boolean {
+  const configured = process.env.TOOL_PLANNING_ENABLED?.trim().toLowerCase();
+
+  if (configured === "true") {
+    return true;
+  }
+
+  if (configured === "false") {
+    return false;
+  }
+
+  return process.env.CHAT_PROVIDER?.trim().toLowerCase() !== "ollama";
 }
 
 export function formatToolResultsForPrompt(

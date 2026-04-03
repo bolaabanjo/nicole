@@ -52,15 +52,19 @@ export async function POST(req: NextRequest) {
 
     let fullSystemPrompt = systemPrompt;
     if (shouldAttemptToolUse(message)) {
-      const toolPlan = await runToolPlanningLoop({
-        systemPrompt,
-        recentMessages,
-        userMessage: message,
-      });
-      const toolContext = formatToolResultsForPrompt(toolPlan.toolResults);
+      try {
+        const toolPlan = await runToolPlanningLoop({
+          systemPrompt,
+          recentMessages,
+          userMessage: message,
+        });
+        const toolContext = formatToolResultsForPrompt(toolPlan.toolResults);
 
-      if (toolContext) {
-        fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. Use these results naturally in the reply. Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
+        if (toolContext) {
+          fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. Use these results naturally in the reply. Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
+        }
+      } catch (error) {
+        console.error("Tool planning failed, continuing without tools:", error);
       }
     }
 
