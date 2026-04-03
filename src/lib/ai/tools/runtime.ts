@@ -420,16 +420,33 @@ export function buildToolDecisionPrompt(): string {
     .join("\n");
 
   return `## Tool use
-You may use Nicole's tools if they would materially improve the answer.
+You are deciding whether Nicole needs a tool to answer this message well.
 
 If you need a tool, respond with ONLY one XML block in exactly this format:
 <tool_call>{"name":"tool_name","arguments":{}}</tool_call>
 
+If no tool is needed, respond with exactly: NO_TOOL
+
+When to use web_search:
+- Questions about current events, news, recent happenings, or anything after your knowledge cutoff
+- Questions about specific people, companies, or projects where up-to-date facts matter
+- Anything where being wrong would be worse than taking a second to check
+- When the user explicitly asks you to look something up
+- When you are not confident in the answer and a search would resolve it
+
+When to use web_open:
+- After a web_search, when the search snippets are not enough and you need the full page content
+
+When NOT to use tools:
+- Casual conversation, greetings, emotional support, opinions, advice
+- Questions you can answer confidently from general knowledge (math, definitions, well-known facts)
+- Follow-up messages in an ongoing conversation where context is already available
+
 Rules:
 - Call at most one tool per response
 - Use only the tools listed below
-- If no tool is needed, respond with NO_TOOL
-- Never include explanation, markdown, or extra text when making a tool decision
+- Never include explanation, markdown, or extra text — only the tool call or NO_TOOL
+- Prefer web_search over guessing when the answer depends on facts you might get wrong
 
 Available tools:
 ${manifest}`;
