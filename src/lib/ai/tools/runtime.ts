@@ -447,6 +447,17 @@ export async function runDirectToolRouting(
   return [await executeToolCall(directToolCall)];
 }
 
+/**
+ * Messages that are clearly casual / emotional and should never trigger tools.
+ * Keep this tight — when in doubt, let the LLM planner decide.
+ */
+const TOOL_BYPASS_PATTERNS = [
+  ...CASUAL_TOOL_BYPASS_PATTERNS,
+  /^(thanks|thank you|thx|ty|ok|okay|k|cool|nice|lol|haha|hmm|yeah|nah|nope|yep|bet|got it|alright)[.!?]*$/i,
+  /^(good morning|good night|gn|gm|morning)[.!?]*$/i,
+  /^(i love you|i hate you|i miss you|fuck|shit|damn)[.!?]*$/i,
+];
+
 export function shouldAttemptToolUse(message: string): boolean {
   if (!TOOL_PLANNING_ENABLED) {
     return false;
@@ -458,17 +469,51 @@ export function shouldAttemptToolUse(message: string): boolean {
     return false;
   }
 
-  if (CASUAL_TOOL_BYPASS_PATTERNS.some((pattern) => pattern.test(normalized))) {
+  // Short casual messages — skip tools entirely
+  if (TOOL_BYPASS_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return false;
   }
 
+  // Direct command patterns — always use tools
   if (DIRECT_TOOL_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return true;
   }
 
-  return /\b(search|look up|lookup|latest|current|research|find out|web|source|sources|library|pdf|document|notes?|remember|save this|store this|list tools|what can you do|create note|update note)\b/.test(
-    normalized
-  );
+  // Explicit tool keywords — always use tools
+  if (
+    /\b(search|look up|lookup|research|find out|web|source|sources|library|pdf|document|notes?|remember|save this|store this|list tools|what can you do|create note|update note)\b/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  // Questions that likely need current/external information — let the planner decide
+  if (
+    /\b(latest|current|recent|today|yesterday|this week|this month|right now|news|update|happening|weather|price|stock|score|result|release|announce|launch)\b/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  // Questions starting with who/what/when/where/how/why/is/are/did/does/has/have + enough length
+  // Short ones like "what?" or "who cares" get filtered, but real questions go to the planner
+  if (
+    normalized.length > 15 &&
+    /^(who|what|when|where|how|why|is|are|did|does|has|have|can|could|will|should)\b/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  // If the message is a question (ends with ?) and is substantive, let the planner decide
+  if (normalized.endsWith("?") && normalized.length > 20) {
+    return true;
+  }
+
+  return false;
 }
 
 export async function runToolPlanningLoop(
