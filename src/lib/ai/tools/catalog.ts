@@ -292,7 +292,7 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "read",
     requiresConfirmation: false,
     availability: "hybrid",
-    status: "planned",
+    status: "ready",
     inputSchema: {
       type: "object",
       properties: {

@@ -14,7 +14,7 @@ import {
 } from "@/lib/db/schema";
 import { deepResearch } from "@/lib/search/research";
 import { searchRelevantSourceChunks } from "@/lib/search/semantic";
-import { searchWeb } from "@/lib/search/web";
+import { searchWeb, fetchPageContent } from "@/lib/search/web";
 import {
   READY_TOOL_NAMES,
   TOOL_CATALOG,
@@ -194,6 +194,14 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const limit = readOptionalNumber(input, "limit", 5, 1, 10);
     const results = await searchWeb(query, limit);
     return { results };
+  },
+  web_open: async (input) => {
+    const url = readRequiredString(input, "url");
+    const page = await fetchPageContent(url);
+    if (!page.text) {
+      throw new Error(`Could not extract content from: ${url}`);
+    }
+    return { title: page.title, url: page.url, text: page.text, wordCount: page.wordCount };
   },
   deep_research: async (input) => {
     const query = readRequiredString(input, "query");
