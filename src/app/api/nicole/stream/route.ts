@@ -85,24 +85,38 @@ export async function POST(req: NextRequest) {
 
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
+    const reader = stream.getReader();
+    let responseClosed = false;
 
     const responseStream = new ReadableStream({
       async start(controller) {
         let fullContent = "";
 
         try {
-          const reader = stream.getReader();
-
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            if (responseClosed) break;
 
             const chunk = decoder.decode(value, { stream: true });
             fullContent += chunk;
-            controller.enqueue(encoder.encode(chunk));
+
+            try {
+              controller.enqueue(encoder.encode(chunk));
+            } catch (error) {
+              if (isControllerClosedError(error)) {
+                responseClosed = true;
+                await reader.cancel();
+                break;
+              }
+
+              throw error;
+            }
           }
         } catch (error) {
-          console.error("Nicole stream error:", error);
+          if (!responseClosed && !isControllerClosedError(error)) {
+            console.error("Nicole stream error:", error);
+          }
         } finally {
           if (fullContent) {
             await saveChatMessage("assistant", fullContent);
@@ -116,8 +130,18 @@ export async function POST(req: NextRequest) {
             summarizeOldConversations().catch(() => {});
           }
 
-          controller.close();
+          if (!responseClosed) {
+            try {
+              controller.close();
+            } catch {}
+          }
         }
+      },
+      async cancel() {
+        responseClosed = true;
+        try {
+          await reader.cancel();
+        } catch {}
       },
     });
 
@@ -138,4 +162,16 @@ export async function POST(req: NextRequest) {
       { status: 503 }
     );
   }
+}
+
+function isControllerClosedError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { code?: string; message?: string };
+  return (
+    candidate.code === "ERR_INVALID_STATE" ||
+    candidate.message?.includes("Controller is already closed") === true
+  );
 }
