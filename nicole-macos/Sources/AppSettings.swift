@@ -70,6 +70,7 @@ final class AppSettings: ObservableObject {
     static let windowMode = "nicole.macos.window-mode"
     static let includeClipboard = "nicole.macos.include-clipboard"
     static let voiceRepliesEnabled = "nicole.macos.voice-replies-enabled"
+    static let alwaysOnVoiceEnabled = "nicole.macos.always-on-voice-enabled"
   }
 
   @Published var serverName: String {
@@ -99,6 +100,12 @@ final class AppSettings: ObservableObject {
   @Published var voiceRepliesEnabled: Bool {
     didSet {
       UserDefaults.standard.set(voiceRepliesEnabled, forKey: Keys.voiceRepliesEnabled)
+    }
+  }
+
+  @Published var alwaysOnVoiceEnabled: Bool {
+    didSet {
+      UserDefaults.standard.set(alwaysOnVoiceEnabled, forKey: Keys.alwaysOnVoiceEnabled)
     }
   }
 
@@ -147,5 +154,7 @@ final class AppSettings: ObservableObject {
       UserDefaults.standard.object(forKey: Keys.includeClipboard) as? Bool ?? true
     self.voiceRepliesEnabled =
       UserDefaults.standard.object(forKey: Keys.voiceRepliesEnabled) as? Bool ?? false
+    self.alwaysOnVoiceEnabled =
+      UserDefaults.standard.object(forKey: Keys.alwaysOnVoiceEnabled) as? Bool ?? false
   }
 }

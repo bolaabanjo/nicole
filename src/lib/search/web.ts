@@ -59,12 +59,18 @@ async function searchSearXNG(
   }
 
   const data = await res.json();
-
-  return (data.results || []).slice(0, limit).map((r: any) => ({
+  const results = (data.results || []).slice(0, limit).map((r: any) => ({
     title: r.title || "",
     url: r.url || "",
     content: r.content || "",
   }));
+
+  console.log(`[SearXNG] query="${query}" → ${results.length} results from ${SEARXNG_ENGINES}${results.length === 0 ? " (EMPTY)" : ""}`);
+  if (results.length > 0) {
+    console.log(`[SearXNG] top result: "${results[0].title}" → ${results[0].url}`);
+  }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,19 +137,18 @@ async function searchDuckDuckGo(
 }
 
 // ---------------------------------------------------------------------------
-// Public search API: Google via SearXNG, with optional non-Google fallback
+// Public search API: SearXNG → DuckDuckGo
 // ---------------------------------------------------------------------------
 
 /**
- * Search the web through Google results exposed by SearXNG.
- * Optional non-Google fallback can be enabled explicitly via env.
+ * Search the web. Google results via SearXNG, DuckDuckGo as fallback.
  */
 export async function searchWeb(
   query: string,
   limit = 5,
   categories = "general"
 ): Promise<SearchResponse> {
-  // Google via SearXNG
+  // 1. Google via SearXNG
   try {
     const results = await searchSearXNG(query, limit, categories);
     return { results, provider: "google" };
@@ -151,6 +156,7 @@ export async function searchWeb(
     console.error("Google search via SearXNG failed:", error);
   }
 
+  // 2. DuckDuckGo fallback
   if (ALLOW_NON_GOOGLE_SEARCH_FALLBACK) {
     try {
       const results = await searchDuckDuckGo(query, limit);
@@ -163,9 +169,7 @@ export async function searchWeb(
   return {
     results: [],
     provider: "google",
-    error: ALLOW_NON_GOOGLE_SEARCH_FALLBACK
-      ? "Google search is unavailable right now. The optional DuckDuckGo fallback also failed."
-      : "Google search is unavailable right now.",
+    error: "Google search via SearXNG is unavailable.",
   };
 }
 

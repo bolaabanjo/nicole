@@ -18,8 +18,12 @@ struct NicoleMacOSApp: App {
           if settings.windowMode != .expanded {
             settings.windowMode = .expanded
           }
-          appDelegate.settings = settings
           viewModel.attachVoiceController(voiceController)
+          appDelegate.configure(
+            settings: settings,
+            viewModel: viewModel,
+            voiceController: voiceController
+          )
           CompactWindowManager.shared.setup(
             settings: settings,
             viewModel: viewModel,

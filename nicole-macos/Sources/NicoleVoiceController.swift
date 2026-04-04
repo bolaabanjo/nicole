@@ -3,10 +3,11 @@ import AVFoundation
 import Speech
 
 @MainActor
-final class NicoleVoiceController: NSObject, ObservableObject {
+final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
   enum Surface: Equatable {
     case expanded
     case compact
+    case ambient
   }
 
   enum InputState: Equatable {
@@ -38,7 +39,15 @@ final class NicoleVoiceController: NSObject, ObservableObject {
   private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
   private var recognitionTask: SFSpeechRecognitionTask?
   private var transcriptSink: ((String) -> Void)?
+  private var finalTranscriptSink: ((String) -> Void)?
   private var lastSpokenAssistantMessageID: String?
+  private var pendingReplyCompletion: (() -> Void)?
+  private var forceSpeakNextReply = false
+
+  override init() {
+    super.init()
+    synthesizer.delegate = self
+  }
 
   func isListening(on surface: Surface) -> Bool {
     guard case let .listening(activeSurface) = inputState else {
@@ -68,11 +77,38 @@ final class NicoleVoiceController: NSObject, ObservableObject {
     stopListening()
   }
 
+  func startAmbientCapture(onFinalTranscript: @escaping (String) -> Void) {
+    Task {
+      await startListening(
+        on: .ambient,
+        seedText: "",
+        onTranscript: { _ in },
+        onFinalTranscript: onFinalTranscript
+      )
+    }
+  }
+
+  func prepareForAmbientReply(onCompletion: @escaping () -> Void) {
+    synthesizer.stopSpeaking(at: .immediate)
+    forceSpeakNextReply = true
+    pendingReplyCompletion = onCompletion
+  }
+
+  func completePreparedReplyWithoutSpeech() {
+    forceSpeakNextReply = false
+    let completion = pendingReplyCompletion
+    pendingReplyCompletion = nil
+    completion?()
+  }
+
+  func stopSpeaking() {
+    synthesizer.stopSpeaking(at: .immediate)
+  }
+
   func handleCompletedAssistantMessage(_ message: NicoleMessage) {
     guard
       let appDelegate = NSApp.delegate as? AppDelegate,
       let settings = appDelegate.settings,
-      settings.voiceRepliesEnabled,
       message.role == .assistant,
       !message.content.isEmpty,
       lastSpokenAssistantMessageID != message.id
@@ -80,14 +116,25 @@ final class NicoleVoiceController: NSObject, ObservableObject {
       return
     }
 
+    let shouldSpeak = settings.voiceRepliesEnabled || forceSpeakNextReply
+    let completion = pendingReplyCompletion
+    pendingReplyCompletion = nil
+    forceSpeakNextReply = false
+
+    guard shouldSpeak else {
+      completion?()
+      return
+    }
+
     lastSpokenAssistantMessageID = message.id
-    speak(text: message.content)
+    speak(text: message.content, onCompletion: completion)
   }
 
   private func startListening(
     on surface: Surface,
     seedText: String,
-    onTranscript: @escaping (String) -> Void
+    onTranscript: @escaping (String) -> Void,
+    onFinalTranscript: ((String) -> Void)? = nil
   ) async {
     guard let speechRecognizer else {
       inputState = .failed("Speech recognition isn’t available on this Mac.")
@@ -98,7 +145,7 @@ final class NicoleVoiceController: NSObject, ObservableObject {
     stopListening(clearStatus: false)
     inputState = .requestingPermissions
 
-    let permissions = await requestPermissions()
+    let permissions = await NicoleSpeechPermissionManager.requestPermissions()
     guard permissions.microphoneGranted else {
       inputState = .failed("Microphone access is blocked. Enable it for Nicole or Xcode in Privacy & Security.")
       return
@@ -109,13 +156,21 @@ final class NicoleVoiceController: NSObject, ObservableObject {
       return
     }
 
+    if permissions.promptedDuringRequest {
+      inputState = .requestingPermissions
+      try? await Task.sleep(for: .milliseconds(900))
+    }
+
     do {
       let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
       recognitionRequest.shouldReportPartialResults = true
-      recognitionRequest.requiresOnDeviceRecognition = speechRecognizer.supportsOnDeviceRecognition
+      if speechRecognizer.supportsOnDeviceRecognition {
+        recognitionRequest.requiresOnDeviceRecognition = true
+      }
 
       self.recognitionRequest = recognitionRequest
       self.transcriptSink = onTranscript
+      self.finalTranscriptSink = onFinalTranscript
       self.inputState = .listening(surface)
 
       let inputNode = audioEngine.inputNode
@@ -141,6 +196,7 @@ final class NicoleVoiceController: NSObject, ObservableObject {
             self.transcriptSink?(transcript)
 
             if result.isFinal {
+              self.finalTranscriptSink?(transcript)
               self.stopListening()
             }
           }
@@ -172,13 +228,15 @@ final class NicoleVoiceController: NSObject, ObservableObject {
 
     audioEngine.inputNode.removeTap(onBus: 0)
     transcriptSink = nil
+    finalTranscriptSink = nil
 
     if clearStatus {
       inputState = .idle
     }
   }
 
-  private func speak(text: String) {
+  private func speak(text: String, onCompletion: (() -> Void)? = nil) {
+    pendingReplyCompletion = onCompletion
     let utterance = AVSpeechUtterance(string: text)
     utterance.rate = 0.48
     utterance.pitchMultiplier = 1.02
@@ -201,47 +259,19 @@ final class NicoleVoiceController: NSObject, ObservableObject {
     return "\(trimmedSeed) \(trimmedTranscript)"
   }
 
-  private func requestPermissions() async -> (speechGranted: Bool, microphoneGranted: Bool) {
-    async let speechGranted = requestSpeechAuthorization()
-    async let microphoneGranted = requestMicrophoneAuthorization()
-    return await (speechGranted, microphoneGranted)
-  }
-
-  private func requestSpeechAuthorization() async -> Bool {
-    let status = SFSpeechRecognizer.authorizationStatus()
-
-    switch status {
-    case .authorized:
-      return true
-    case .denied, .restricted:
-      return false
-    case .notDetermined:
-      return await withCheckedContinuation { continuation in
-        SFSpeechRecognizer.requestAuthorization { authorizationStatus in
-          continuation.resume(returning: authorizationStatus == .authorized)
-        }
-      }
-    @unknown default:
-      return false
+  nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    Task { @MainActor in
+      let completion = self.pendingReplyCompletion
+      self.pendingReplyCompletion = nil
+      completion?()
     }
   }
 
-  private func requestMicrophoneAuthorization() async -> Bool {
-    let status = AVCaptureDevice.authorizationStatus(for: .audio)
-
-    switch status {
-    case .authorized:
-      return true
-    case .denied, .restricted:
-      return false
-    case .notDetermined:
-      return await withCheckedContinuation { continuation in
-        AVCaptureDevice.requestAccess(for: .audio) { granted in
-          continuation.resume(returning: granted)
-        }
-      }
-    @unknown default:
-      return false
+  nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+    Task { @MainActor in
+      let completion = self.pendingReplyCompletion
+      self.pendingReplyCompletion = nil
+      completion?()
     }
   }
 }

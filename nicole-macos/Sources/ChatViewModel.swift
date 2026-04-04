@@ -22,6 +22,8 @@ final class ChatViewModel: ObservableObject {
 
   private let apiClient = NicoleAPIClient()
   private var rawAssistantBuffers: [String: String] = [:]
+  private var completionContinuations: [String: CheckedContinuation<NicoleMessage?, Never>] = [:]
+  private var completedAssistantResults: [String: NicoleMessage?] = [:]
   private weak var voiceController: NicoleVoiceController?
 
   func attachVoiceController(_ controller: NicoleVoiceController) {
@@ -125,6 +127,31 @@ final class ChatViewModel: ObservableObject {
     )
   }
 
+  func sendVoiceMessage(
+    _ message: String,
+    baseURLString: String,
+    settings: AppSettings
+  ) async -> NicoleMessage? {
+    let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+
+    guard let assistantID = await sendCompactMessage(
+      trimmed,
+      baseURLString: baseURLString,
+      settings: settings
+    ) else {
+      return nil
+    }
+
+    if let completedResult = completedAssistantResults.removeValue(forKey: assistantID) {
+      return completedResult
+    }
+
+    return await withCheckedContinuation { continuation in
+      completionContinuations[assistantID] = continuation
+    }
+  }
+
   private var thoughtStartTimes: [String: Date] = [:]
 
   private func beginStreamSend(
@@ -194,6 +221,11 @@ final class ChatViewModel: ObservableObject {
         id: assistantID,
         content: "I'm unavailable right now."
       )
+      if let continuation = completionContinuations.removeValue(forKey: assistantID) {
+        continuation.resume(returning: nil)
+      } else {
+        completedAssistantResults[assistantID] = nil
+      }
       errorText = error.localizedDescription
       connectionState = .failed(error.localizedDescription)
       isSending = false
@@ -247,6 +279,12 @@ final class ChatViewModel: ObservableObject {
 
     if !messages[index].content.isEmpty {
       voiceController?.handleCompletedAssistantMessage(messages[index])
+    }
+
+    if let continuation = completionContinuations.removeValue(forKey: id) {
+      continuation.resume(returning: messages[index])
+    } else {
+      completedAssistantResults[id] = messages[index]
     }
 
     thoughtStartTimes.removeValue(forKey: id)

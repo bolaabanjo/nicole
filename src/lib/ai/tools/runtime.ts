@@ -822,7 +822,7 @@ function parseWebSearchToolCall(
 ): ToolCall | null {
   const explicitMatch =
     message.match(
-      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:search the web|search web|web search|google|look up|lookup)\s+(?:for\s+)?(.+)$/i
+      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:search|search the web|search web|web search|google|look up|lookup)\s+(?:the web\s+)?(?:for\s+)?(.+)$/i
     ) ||
     message.match(
       /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:tell me|find out)\s+who\s+(.+?)\s+is(?:\s+and\s+tell\s+me\s+what\s+you\s+find)?[?.!]*$/i

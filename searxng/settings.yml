@@ -8,3 +8,26 @@ search:
   formats:
     - html
     - json
+  default_lang: "en"
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: false
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: false
+
+outgoing:
+  request_timeout: 8
+  useragent_suffix: ""

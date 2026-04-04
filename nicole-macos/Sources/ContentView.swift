@@ -278,9 +278,14 @@ private struct SettingsView: View {
         }
 
         Section("Voice") {
+          Toggle("Always listen for “Hey Nicole” or “Nicole”", isOn: $settings.alwaysOnVoiceEnabled)
           Toggle("Speak Nicole's replies aloud", isOn: $settings.voiceRepliesEnabled)
 
-          Text("Voice input stays on your Mac. Use the microphone button to fill the composer with live transcription, and let Nicole read finished replies aloud when you want a hands-free loop.")
+          Text("Always-on voice is Mac-only in this build. When enabled, Nicole listens locally for “Hey Nicole” or “Nicole”, sends the spoken request through Banjo, speaks back through your Mac, then resumes listening.")
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+
+          Text("The microphone button still fills the composer with live transcription when you want a UI-driven loop.")
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
         }

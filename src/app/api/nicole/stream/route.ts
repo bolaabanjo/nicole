@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
     const toolContext = formatToolResultsForPrompt(toolResults);
 
     if (toolContext) {
-      fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. Use these results naturally in the reply. Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
+      fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. CRITICAL RULES:\n- Base your answer ONLY on the tool results below. Do not invent, fabricate, or hallucinate information that is not in the results.\n- If the results are empty, irrelevant, or don't answer the question, say so honestly. Never make up a confident-sounding answer.\n- Summarize what the results actually say. Quote or paraphrase them, don't embellish.\n- Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
     }
 
     const fullMessages: ChatMessage[] = [
