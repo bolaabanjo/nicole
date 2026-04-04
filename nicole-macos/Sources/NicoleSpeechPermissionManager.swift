@@ -23,8 +23,7 @@ enum NicoleSpeechPermissionManager {
     )
   }
 
-  @MainActor
-  private static func requestSpeechAuthorization(currentStatus: SFSpeechRecognizerAuthorizationStatus) async -> Bool {
+  nonisolated private static func requestSpeechAuthorization(currentStatus: SFSpeechRecognizerAuthorizationStatus) async -> Bool {
     switch currentStatus {
     case .authorized:
       return true
@@ -41,8 +40,7 @@ enum NicoleSpeechPermissionManager {
     }
   }
 
-  @MainActor
-  private static func requestMicrophoneAuthorization(currentStatus: AVAuthorizationStatus) async -> Bool {
+  nonisolated private static func requestMicrophoneAuthorization(currentStatus: AVAuthorizationStatus) async -> Bool {
     switch currentStatus {
     case .authorized:
       return true
