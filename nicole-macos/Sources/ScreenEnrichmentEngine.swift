@@ -126,8 +126,8 @@ actor ScreenEnrichmentEngine {
         continuation.resume(returning: String(collapsed.prefix(1500)))
       }
 
-      request.recognitionLevel = .fast
-      request.usesLanguageCorrection = false
+      request.recognitionLevel = .accurate
+      request.usesLanguageCorrection = true
       request.minimumTextHeight = 0.012
       request.recognitionLanguages = ["en-US"]
 

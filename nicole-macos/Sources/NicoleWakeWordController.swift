@@ -80,45 +80,46 @@ final class NicoleWakeWordController: NSObject, ObservableObject {
       let inputNode = audioEngine.inputNode
       let format = inputNode.outputFormat(forBus: 0)
       inputNode.removeTap(onBus: 0)
-      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-        self?.recognitionRequest?.append(buffer)
+      nonisolated(unsafe) let tapRequest = recognitionRequest
+      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
+        tapRequest.append(buffer)
       }
 
       audioEngine.prepare()
       try audioEngine.start()
 
-      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
-        guard let self else { return }
-
+      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
         if let result {
           let normalizedTranscript = Self.normalize(result.bestTranscription.formattedString)
+          let isFinal = result.isFinal
 
-          if let wakeDetection = self.detectWakeWord(in: normalizedTranscript, isFinal: result.isFinal) {
-            Task { @MainActor in
+          Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            if let wakeDetection = self.detectWakeWord(in: normalizedTranscript, isFinal: isFinal) {
               self.lastTriggeredAt = Date()
               self.shouldRemainListening = false
               self.teardown(clearState: true)
               self.wakeSink?(wakeDetection)
+              return
             }
-            return
-          }
 
-          if result.isFinal, self.shouldRemainListening {
-            Task { @MainActor in
+            if isFinal, self.shouldRemainListening {
               await self.restartAfterDelay()
             }
-            return
           }
+          return
         }
 
         if let error {
-          Task { @MainActor in
-            self.teardown(clearState: false)
+          let message = error.localizedDescription
+          Task { @MainActor [weak self] in
+            guard let self else { return }
             if self.shouldRemainListening {
-              self.state = .failed("Wake word listening stopped: \(error.localizedDescription)")
+              self.state = .failed("Wake word: \(message)")
               await self.restartAfterDelay()
             } else {
-              self.state = .idle
+              self.teardown(clearState: true)
             }
           }
         }
@@ -132,7 +133,88 @@ final class NicoleWakeWordController: NSObject, ObservableObject {
   private func restartAfterDelay() async {
     guard shouldRemainListening else { return }
     try? await Task.sleep(for: .milliseconds(450))
-    await beginWakeListening()
+    await restartRecognitionOnly()
+  }
+
+  /// Restart just the speech recognition task while keeping the audio engine
+  /// (and therefore the microphone) running. This prevents the orange mic
+  /// indicator from blinking on every recognition cycle.
+  private func restartRecognitionOnly() async {
+    guard shouldRemainListening else { return }
+    guard let speechRecognizer else { return }
+
+    // Tear down only the recognition side, keep audio engine alive
+    recognitionTask?.cancel()
+    recognitionTask = nil
+    recognitionRequest?.endAudio()
+    recognitionRequest = nil
+
+    // Ensure the audio engine is still running (it should be)
+    guard audioEngine.isRunning else {
+      // If the engine died for some reason, do a full restart
+      await beginWakeListening()
+      return
+    }
+
+    do {
+      let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+      recognitionRequest.shouldReportPartialResults = true
+      if speechRecognizer.supportsOnDeviceRecognition {
+        recognitionRequest.requiresOnDeviceRecognition = true
+      }
+
+      self.recognitionRequest = recognitionRequest
+      self.state = .listening
+
+      // Re-install the tap so the new request receives audio buffers
+      let inputNode = audioEngine.inputNode
+      let format = inputNode.outputFormat(forBus: 0)
+      inputNode.removeTap(onBus: 0)
+      nonisolated(unsafe) let tapRequest = recognitionRequest
+      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
+        tapRequest.append(buffer)
+      }
+
+      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
+        if let result {
+          let normalizedTranscript = Self.normalize(result.bestTranscription.formattedString)
+          let isFinal = result.isFinal
+
+          Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            if let wakeDetection = self.detectWakeWord(in: normalizedTranscript, isFinal: isFinal) {
+              self.lastTriggeredAt = Date()
+              self.shouldRemainListening = false
+              self.teardown(clearState: true)
+              self.wakeSink?(wakeDetection)
+              return
+            }
+
+            if isFinal, self.shouldRemainListening {
+              await self.restartAfterDelay()
+            }
+          }
+          return
+        }
+
+        if let error {
+          let message = error.localizedDescription
+          Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.shouldRemainListening {
+              self.state = .failed("Wake word: \(message)")
+              await self.restartAfterDelay()
+            } else {
+              self.state = .idle
+            }
+          }
+        }
+      }
+    } catch {
+      // If re-creating the recognition task fails, try a full restart
+      await beginWakeListening()
+    }
   }
 
   private func teardown(clearState: Bool) {

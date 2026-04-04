@@ -176,36 +176,42 @@ final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesiz
       let inputNode = audioEngine.inputNode
       let format = inputNode.outputFormat(forBus: 0)
       inputNode.removeTap(onBus: 0)
-      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-        self?.recognitionRequest?.append(buffer)
+      nonisolated(unsafe) let tapRequest = recognitionRequest
+      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
+        tapRequest.append(buffer)
       }
 
       audioEngine.prepare()
       try audioEngine.start()
 
-      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
-        guard let self else { return }
-
+      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
         if let result {
-          let transcript = self.mergeTranscript(
-            seedText: seedText,
-            transcript: result.bestTranscription.formattedString
-          )
+          let rawTranscript = result.bestTranscription.formattedString
+          let isFinal = result.isFinal
 
-          Task { @MainActor in
+          Task { @MainActor [weak self] in
+            guard let self else { return }
+            let transcript = self.mergeTranscript(
+              seedText: seedText,
+              transcript: rawTranscript
+            )
             self.transcriptSink?(transcript)
 
-            if result.isFinal {
+            if isFinal {
               self.finalTranscriptSink?(transcript)
               self.stopListening()
             }
           }
+          // Don't process error if we got a valid result
+          return
         }
 
         if let error {
-          Task { @MainActor in
+          let message = error.localizedDescription
+          Task { @MainActor [weak self] in
+            guard let self else { return }
             self.stopListening(clearStatus: false)
-            self.inputState = .failed("Voice input stopped: \(error.localizedDescription)")
+            self.inputState = .failed("Voice input stopped: \(message)")
           }
         }
       }
