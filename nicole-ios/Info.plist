@@ -35,5 +35,9 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Nicole uses the microphone for voice input.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Nicole uses speech recognition to transcribe your voice into text.</string>
 </dict>
 </plist>

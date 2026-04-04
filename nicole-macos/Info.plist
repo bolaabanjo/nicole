@@ -28,6 +28,8 @@
 	<string>Nicole uses screen capture to understand what you're working on and provide context-aware help.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Nicole uses the microphone for voice input.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Nicole uses speech recognition to turn your voice into messages.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Nicole uses AppleScript to read browser URLs and app context.</string>
 </dict>

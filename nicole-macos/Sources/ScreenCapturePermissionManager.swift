@@ -1,18 +1,24 @@
-import CoreGraphics
 import Foundation
+@preconcurrency import ScreenCaptureKit
 
 @MainActor
 enum ScreenCapturePermissionManager {
-  static var hasPermission: Bool {
-    CGPreflightScreenCaptureAccess()
+  /// Check if screen capture actually works by trying to get shareable content.
+  /// This is more reliable than CGPreflightScreenCaptureAccess() for self-signed apps.
+  static func checkPermission() async -> Bool {
+    do {
+      _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+      return true
+    } catch {
+      return false
+    }
   }
 
-  /// Request screen capture permission on launch.
-  /// With stable code signing, macOS remembers the grant —
-  /// this only shows a dialog if permission hasn't been granted yet.
+  /// Request screen capture permission on launch if not already granted.
   static func requestOnLaunch() {
-    if !CGPreflightScreenCaptureAccess() {
-      Task.detached(priority: .userInitiated) {
+    Task.detached(priority: .userInitiated) {
+      let hasAccess = await checkPermission()
+      if !hasAccess {
         _ = CGRequestScreenCaptureAccess()
       }
     }

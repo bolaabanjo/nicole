@@ -9,15 +9,8 @@ actor ScreenEnrichmentEngine {
   private init() {}
 
   func enrichAndStoreVisibleText(from fastSnapshot: FastWorkspaceSnapshot) async {
-    guard CGPreflightScreenCaptureAccess() else {
-      await WorkspaceSnapshotStore.shared.storeEnrichedVisibleContent(
-        nil,
-        failureReason: "Screen Recording permission is unavailable, so Nicole is using metadata only.",
-        for: fastSnapshot.target
-      )
-      return
-    }
-
+    // Don't gate on CGPreflightScreenCaptureAccess() — it returns false
+    // for self-signed apps even when permission is granted. Just try to capture.
     do {
       guard let image = try await captureImage(for: fastSnapshot.target) else {
         await WorkspaceSnapshotStore.shared.storeEnrichedVisibleContent(

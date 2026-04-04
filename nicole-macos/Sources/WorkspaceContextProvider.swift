@@ -59,8 +59,7 @@ enum WorkspaceContextProvider {
         payload.visibleContent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
 
       if !hasVisibleContent,
-         let target = cached.target,
-         CGPreflightScreenCaptureAccess()
+         let target = cached.target
       {
         if let awaited = await WorkspaceSnapshotStore.shared.waitForVisibleContent(
           target: target

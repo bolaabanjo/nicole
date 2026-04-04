@@ -822,9 +822,14 @@ function parseWebSearchToolCall(
 ): ToolCall | null {
   const explicitMatch =
     message.match(
-      /^(?:search the web|search web|web search|google|look up|lookup)\s+(?:for\s+)?(.+)$/i
+      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:search the web|search web|web search|google|look up|lookup)\s+(?:for\s+)?(.+)$/i
     ) ||
-    message.match(/^(?:who|what|where|when)\s+is\s+(.+)\??$/i);
+    message.match(
+      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:tell me|find out)\s+who\s+(.+?)\s+is(?:\s+and\s+tell\s+me\s+what\s+you\s+find)?[?.!]*$/i
+    ) ||
+    message.match(
+      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?who\s+is\s+(.+)\??$/i
+    );
 
   if (explicitMatch) {
     const query = cleanSearchQuery(explicitMatch[1]);
@@ -854,7 +859,7 @@ function parseDeepResearchToolCall(
   recentMessages: ChatMessage[]
 ): ToolCall | null {
   const explicitMatch = message.match(
-    /^(?:research|deep research|look into|find out about)\s+(.+)$/i
+    /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:research|deep research|look into|find out about)\s+(.+)$/i
   );
 
   if (explicitMatch) {
@@ -1049,6 +1054,10 @@ function inferSearchQueryFromHistory(recentMessages: ChatMessage[]): string | nu
 
 function cleanSearchQuery(value: string): string {
   return value
+    .replace(/\s+and\s+tell\s+me\s+what\s+you\s+find.*$/i, "")
+    .replace(/\s+and\s+let\s+me\s+know.*$/i, "")
+    .replace(/\s+for\s+me.*$/i, "")
+    .replace(/\s+is$/i, "")
     .replace(/[?.!]+$/g, "")
     .replace(/^who\s+/i, "")
     .replace(/^what\s+/i, "")

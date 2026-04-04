@@ -69,6 +69,7 @@ final class AppSettings: ObservableObject {
     static let baseURL = "nicole.macos.base-url"
     static let windowMode = "nicole.macos.window-mode"
     static let includeClipboard = "nicole.macos.include-clipboard"
+    static let voiceRepliesEnabled = "nicole.macos.voice-replies-enabled"
   }
 
   @Published var serverName: String {
@@ -92,6 +93,12 @@ final class AppSettings: ObservableObject {
   @Published var includeClipboard: Bool {
     didSet {
       UserDefaults.standard.set(includeClipboard, forKey: Keys.includeClipboard)
+    }
+  }
+
+  @Published var voiceRepliesEnabled: Bool {
+    didSet {
+      UserDefaults.standard.set(voiceRepliesEnabled, forKey: Keys.voiceRepliesEnabled)
     }
   }
 
@@ -138,5 +145,7 @@ final class AppSettings: ObservableObject {
       ?? .expanded
     self.includeClipboard =
       UserDefaults.standard.object(forKey: Keys.includeClipboard) as? Bool ?? true
+    self.voiceRepliesEnabled =
+      UserDefaults.standard.object(forKey: Keys.voiceRepliesEnabled) as? Bool ?? false
   }
 }

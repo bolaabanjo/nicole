@@ -35,6 +35,9 @@ final class CompactPanelState: ObservableObject {
 
   func refreshContextLabel() {
     Task {
+      // Wait a moment for OCR to complete
+      try? await Task.sleep(nanoseconds: 600_000_000)
+
       let read = await WorkspaceSnapshotStore.shared.currentSnapshot(maxAge: 5)
       guard let payload = read.payload else {
         contextLabel = nil

@@ -11,6 +11,7 @@ final class CompactWindowManager: ObservableObject {
   private var panelWidth: CGFloat = 520
   private var anchorTopY: CGFloat?
   private weak var currentScreen: NSScreen?
+  private weak var voiceController: NicoleVoiceController?
 
   private init() {}
 
@@ -18,7 +19,13 @@ final class CompactWindowManager: ObservableObject {
     panel?.isVisible ?? false
   }
 
-  func setup(settings: AppSettings, viewModel: ChatViewModel) {
+  func setup(
+    settings: AppSettings,
+    viewModel: ChatViewModel,
+    voiceController: NicoleVoiceController
+  ) {
+    self.voiceController = voiceController
+
     if panel == nil {
       let newPanel = KeyableCompactPanel(
         contentRect: NSRect(
@@ -60,7 +67,8 @@ final class CompactWindowManager: ObservableObject {
       let rootView = CompactView(
         settings: settings,
         viewModel: viewModel,
-        panelState: panelState
+        panelState: panelState,
+        voiceController: voiceController
       )
       let hostingView = NSHostingView(rootView: rootView)
       hostingView.sizingOptions = [.intrinsicContentSize]
@@ -96,6 +104,7 @@ final class CompactWindowManager: ObservableObject {
   func hidePanel() {
     guard let panel else { return }
 
+    voiceController?.stopListeningIfActive(on: .compact)
     panel.orderOut(nil)
     panelState.markHidden()
   }

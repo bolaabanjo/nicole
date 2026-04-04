@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
   @ObservedObject var settings: AppSettings
   @ObservedObject var viewModel: ChatViewModel
+  @ObservedObject var voiceController: NicoleVoiceController
 
   @State private var isShowingSettings = false
   @State private var selectedAttachment: ComposerAttachment?
@@ -176,6 +177,17 @@ struct ContentView: View {
             }
 
           Button {
+            toggleExpandedVoiceInput()
+          } label: {
+            Image(systemName: expandedVoiceIconName)
+              .font(.system(size: 15, weight: .medium))
+              .frame(width: 28, height: 28)
+              .foregroundStyle(expandedVoiceColor)
+          }
+          .buttonStyle(.plain)
+          .help(expandedVoiceHelpText)
+
+          Button {
             submitCurrentMessage()
           } label: {
             Image(systemName: viewModel.isSending ? "ellipsis" : "arrow.up")
@@ -200,6 +212,17 @@ struct ContentView: View {
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
             )
         )
+
+        if let voiceStatusText = voiceController.inlineStatusText {
+          HStack {
+            Text(voiceStatusText)
+              .font(.system(size: 11, weight: .medium))
+              .foregroundStyle(Color.white.opacity(0.45))
+            Spacer(minLength: 0)
+          }
+          .padding(.horizontal, 4)
+          .transition(.opacity)
+        }
 
       }
       .frame(maxWidth: maxContentWidth)
@@ -250,6 +273,14 @@ private struct SettingsView: View {
 
         Section("Context") {
           Text("Nicole now uses hidden local workspace sensing on your Mac. Accessibility improves selected text capture, and Screen Recording enables local OCR of visible screen text. Nothing is shown visibly in the UI.")
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+        }
+
+        Section("Voice") {
+          Toggle("Speak Nicole's replies aloud", isOn: $settings.voiceRepliesEnabled)
+
+          Text("Voice input stays on your Mac. Use the microphone button to fill the composer with live transcription, and let Nicole read finished replies aloud when you want a hands-free loop.")
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
         }
@@ -350,6 +381,7 @@ private extension ContentView {
 
   func submitCurrentMessage() {
     guard !isSendDisabled else { return }
+    voiceController.stopListeningIfActive(on: .expanded)
 
     Task {
       let didComplete = await viewModel.send(
@@ -363,6 +395,29 @@ private extension ContentView {
           selectedAttachment = nil
         }
       }
+    }
+  }
+
+  var expandedVoiceIconName: String {
+    voiceController.isListening(on: .expanded) ? "waveform.circle.fill" : "mic"
+  }
+
+  var expandedVoiceColor: Color {
+    voiceController.isListening(on: .expanded)
+      ? Color.green.opacity(0.95)
+      : Color.white.opacity(0.58)
+  }
+
+  var expandedVoiceHelpText: String {
+    voiceController.isListening(on: .expanded) ? "Stop voice input" : "Start voice input"
+  }
+
+  func toggleExpandedVoiceInput() {
+    voiceController.toggleListening(
+      on: .expanded,
+      seedText: viewModel.input
+    ) { transcript in
+      viewModel.input = transcript
     }
   }
 

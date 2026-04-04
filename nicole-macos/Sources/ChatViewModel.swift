@@ -22,6 +22,11 @@ final class ChatViewModel: ObservableObject {
 
   private let apiClient = NicoleAPIClient()
   private var rawAssistantBuffers: [String: String] = [:]
+  private weak var voiceController: NicoleVoiceController?
+
+  func attachVoiceController(_ controller: NicoleVoiceController) {
+    voiceController = controller
+  }
 
   func loadHistory(baseURLString: String) async {
     guard !baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -238,6 +243,10 @@ final class ChatViewModel: ObservableObject {
 
     if messages[index].thoughtContent != nil {
       messages[index].isThoughtOpen = false
+    }
+
+    if !messages[index].content.isEmpty {
+      voiceController?.handleCompletedAssistantMessage(messages[index])
     }
 
     thoughtStartTimes.removeValue(forKey: id)

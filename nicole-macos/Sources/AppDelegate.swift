@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var hotKeyRef: EventHotKeyRef?
   private var hotKeyHandler: EventHandlerRef?
   private static let summonHotKeyID: UInt32 = 1
+  weak var settings: AppSettings?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)

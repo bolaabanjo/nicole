@@ -12,6 +12,7 @@ struct CompactView: View {
   @ObservedObject var settings: AppSettings
   @ObservedObject var viewModel: ChatViewModel
   @ObservedObject var panelState: CompactPanelState
+  @ObservedObject var voiceController: NicoleVoiceController
 
   @FocusState private var isInputFocused: Bool
   @State private var draft = ""
@@ -81,20 +82,6 @@ struct CompactView: View {
         .frame(minHeight: 400, maxHeight: responseMaxHeight)
       }
 
-      // Context indicator — shows what Nicole can see
-      if let contextLabel = panelState.contextLabel {
-        HStack(spacing: 6) {
-          Circle()
-            .fill(panelState.hasScreenCapture ? Color.green : Color.orange)
-            .frame(width: 6, height: 6)
-          Text(contextLabel)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(Color.white.opacity(0.4))
-          Spacer()
-        }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 4)
-      }
 
       HStack(alignment: .center, spacing: 12) {
         HStack(spacing: 12) {
@@ -124,12 +111,15 @@ struct CompactView: View {
           }
 
         HStack(spacing: 12) {
-          Button(action: {}) {
-            Image(systemName: "mic")
+          Button {
+            toggleCompactVoiceInput()
+          } label: {
+            Image(systemName: compactVoiceIconName)
           }
           .font(.system(size: 15, weight: .medium))
-          .foregroundStyle(Color.white.opacity(0.5))
+          .foregroundStyle(compactVoiceColor)
           .buttonStyle(.plain)
+          .help(compactVoiceHelpText)
 
           Button {
             submit()
@@ -172,6 +162,17 @@ struct CompactView: View {
       )
       .padding(.horizontal, !panelState.exchanges.isEmpty ? 12 : 0)
       .padding(.bottom, !panelState.exchanges.isEmpty ? 12 : 0)
+
+      if let voiceStatusText = voiceController.inlineStatusText {
+        HStack {
+          Text(voiceStatusText)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.42))
+          Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .padding(.bottom, 12)
+      }
     }
     .background(
       RoundedRectangle(cornerRadius: 34, style: .continuous)
@@ -204,11 +205,26 @@ struct CompactView: View {
     viewModel.isSending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
+  private var compactVoiceIconName: String {
+    voiceController.isListening(on: .compact) ? "waveform.circle.fill" : "mic"
+  }
+
+  private var compactVoiceColor: Color {
+    voiceController.isListening(on: .compact)
+      ? Color.green.opacity(0.95)
+      : Color.white.opacity(0.5)
+  }
+
+  private var compactVoiceHelpText: String {
+    voiceController.isListening(on: .compact) ? "Stop voice input" : "Start voice input"
+  }
+
   private func submit() {
     let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty, !viewModel.isSending else { return }
 
     let submittedText = trimmed
+    voiceController.stopListeningIfActive(on: .compact)
 
     Task {
       if let assistantID = await viewModel.sendCompactMessage(
@@ -219,6 +235,15 @@ struct CompactView: View {
         panelState.beginExchange(userText: submittedText, assistantMessageID: assistantID)
         draft = ""
       }
+    }
+  }
+
+  private func toggleCompactVoiceInput() {
+    voiceController.toggleListening(
+      on: .compact,
+      seedText: draft
+    ) { transcript in
+      draft = transcript
     }
   }
 
