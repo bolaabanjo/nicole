@@ -2,6 +2,9 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 
 const SEARXNG_URL = process.env.SEARXNG_URL || "http://localhost:8888";
+const SEARXNG_ENGINES = process.env.SEARXNG_ENGINES || "google";
+const ALLOW_NON_GOOGLE_SEARCH_FALLBACK =
+  process.env.ALLOW_NON_GOOGLE_SEARCH_FALLBACK?.trim().toLowerCase() === "true";
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_WORDS = 4000;
 
@@ -20,7 +23,7 @@ export interface SearchResult {
 
 export interface SearchResponse {
   results: SearchResult[];
-  provider: "searxng" | "duckduckgo";
+  provider: "google" | "duckduckgo";
   error?: string;
 }
 
@@ -44,6 +47,7 @@ async function searchSearXNG(
     q: query,
     format: "json",
     categories,
+    engines: SEARXNG_ENGINES,
   });
 
   const res = await fetch(`${SEARXNG_URL}/search?${params}`, {
@@ -127,38 +131,41 @@ async function searchDuckDuckGo(
 }
 
 // ---------------------------------------------------------------------------
-// Public search API: SearXNG → DuckDuckGo fallback
+// Public search API: Google via SearXNG, with optional non-Google fallback
 // ---------------------------------------------------------------------------
 
 /**
- * Search the web. Tries SearXNG first, falls back to DuckDuckGo if unavailable.
+ * Search the web through Google results exposed by SearXNG.
+ * Optional non-Google fallback can be enabled explicitly via env.
  */
 export async function searchWeb(
   query: string,
   limit = 5,
   categories = "general"
 ): Promise<SearchResponse> {
-  // Try SearXNG first
+  // Google via SearXNG
   try {
     const results = await searchSearXNG(query, limit, categories);
-    return { results, provider: "searxng" };
+    return { results, provider: "google" };
   } catch (error) {
-    console.error("SearXNG failed, trying DuckDuckGo:", error);
+    console.error("Google search via SearXNG failed:", error);
   }
 
-  // Fallback to DuckDuckGo
-  try {
-    const results = await searchDuckDuckGo(query, limit);
-    return { results, provider: "duckduckgo" };
-  } catch (error) {
-    console.error("DuckDuckGo fallback also failed:", error);
+  if (ALLOW_NON_GOOGLE_SEARCH_FALLBACK) {
+    try {
+      const results = await searchDuckDuckGo(query, limit);
+      return { results, provider: "duckduckgo" };
+    } catch (error) {
+      console.error("DuckDuckGo fallback also failed:", error);
+    }
   }
 
-  // Both failed
   return {
     results: [],
-    provider: "searxng",
-    error: "Web search is unavailable right now. Both SearXNG and DuckDuckGo failed to respond.",
+    provider: "google",
+    error: ALLOW_NON_GOOGLE_SEARCH_FALLBACK
+      ? "Google search is unavailable right now. The optional DuckDuckGo fallback also failed."
+      : "Google search is unavailable right now.",
   };
 }
 

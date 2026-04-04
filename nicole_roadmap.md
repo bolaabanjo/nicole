@@ -1,3 +1,5 @@
+cd nicole-macos && ./build.sh
+
 # Nicole → Jarvis — The Full Roadmap
 
 This is a lifelong project. No rush. Each phase builds on the last.

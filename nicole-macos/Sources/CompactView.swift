@@ -81,6 +81,21 @@ struct CompactView: View {
         .frame(minHeight: 400, maxHeight: responseMaxHeight)
       }
 
+      // Context indicator — shows what Nicole can see
+      if let contextLabel = panelState.contextLabel {
+        HStack(spacing: 6) {
+          Circle()
+            .fill(panelState.hasScreenCapture ? Color.green : Color.orange)
+            .frame(width: 6, height: 6)
+          Text(contextLabel)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.4))
+          Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 4)
+      }
+
       HStack(alignment: .center, spacing: 12) {
         HStack(spacing: 12) {
           Button(action: {}) {

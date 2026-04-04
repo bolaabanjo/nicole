@@ -495,11 +495,12 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "read",
     requiresConfirmation: false,
     availability: "hybrid",
-    status: "planned",
+    status: "ready",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string", description: "Email search query." },
+        limit: { type: "number", description: "Maximum number of matching emails to return." },
       },
       required: ["query"],
     },
@@ -514,13 +515,14 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     sideEffectLevel: "actuate",
     requiresConfirmation: true,
     availability: "hybrid",
-    status: "planned",
+    status: "ready",
     inputSchema: {
       type: "object",
       properties: {
         to: { type: "string", description: "Recipient email." },
         subject: { type: "string", description: "Email subject." },
         body: { type: "string", description: "Email body." },
+        cc: { type: "string", description: "Optional CC email address." },
       },
       required: ["to", "subject", "body"],
     },

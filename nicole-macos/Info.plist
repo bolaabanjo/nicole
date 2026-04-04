@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.banjo.nicole</string>
+	<key>CFBundleName</key>
+	<string>Nicole</string>
+	<key>CFBundleDisplayName</key>
+	<string>Nicole</string>
+	<key>CFBundleExecutable</key>
+	<string>NicoleMacOS</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Nicole uses screen capture to understand what you're working on and provide context-aware help.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Nicole uses the microphone for voice input.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Nicole uses AppleScript to read browser URLs and app context.</string>
+</dict>
+</plist>

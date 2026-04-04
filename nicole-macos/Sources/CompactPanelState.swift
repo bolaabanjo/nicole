@@ -16,6 +16,8 @@ final class CompactPanelState: ObservableObject {
   }
 
   @Published var exchanges: [Exchange] = []
+  @Published var contextLabel: String?
+  @Published var hasScreenCapture = false
 
   var isExpanded: Bool {
     currentHeight > Self.collapsedHeight + 12
@@ -28,6 +30,27 @@ final class CompactPanelState: ObservableObject {
   func markShown() {
     isVisible = true
     requestFocus()
+    refreshContextLabel()
+  }
+
+  func refreshContextLabel() {
+    Task {
+      let read = await WorkspaceSnapshotStore.shared.currentSnapshot(maxAge: 5)
+      guard let payload = read.payload else {
+        contextLabel = nil
+        hasScreenCapture = false
+        return
+      }
+
+      let app = payload.activeApp ?? "Unknown"
+      if let visible = payload.visibleContent, !visible.isEmpty {
+        contextLabel = "Seeing: \(app)"
+        hasScreenCapture = true
+      } else {
+        contextLabel = "Metadata: \(app)"
+        hasScreenCapture = false
+      }
+    }
   }
 
   func markHidden() {

@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
     });
 
     let fullSystemPrompt = systemPrompt;
-    const toolResults = await runDirectToolRouting(message);
+    const toolResults = await runDirectToolRouting(message, recentMessages);
 
     if (toolResults.length === 0 && shouldAttemptToolUse(message)) {
       try {

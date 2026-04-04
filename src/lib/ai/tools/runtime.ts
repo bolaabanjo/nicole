@@ -12,6 +12,11 @@ import {
   sources,
   toolInvocations,
 } from "@/lib/db/schema";
+import {
+  createGoogleCalendarEvent,
+  listGoogleCalendarEvents,
+} from "@/lib/integrations/google-calendar";
+import { searchZohoMail, sendZohoMail } from "@/lib/integrations/zoho-mail";
 import { deepResearch } from "@/lib/search/research";
 import { searchRelevantSourceChunks } from "@/lib/search/semantic";
 import { searchWeb, fetchPageContent } from "@/lib/search/web";
@@ -82,6 +87,9 @@ const DIRECT_TOOL_COMMAND_PATTERNS = [
   /\bgit status\b/i,
   /\brepo status\b/i,
   /\bwhat changed in (?:the )?repo\b/i,
+  /\bsearch (?:my )?email\b/i,
+  /\bfind (?:an |the )?email\b/i,
+  /\bsend (?:an )?email\b/i,
   /\brun [`'"]/i,
   /\bexecute [`'"]/i,
 ];
@@ -269,6 +277,32 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
       new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
     const limit = readOptionalNumber(input, "limit", 12, 1, 30);
 
+    const googleEvents = await listGoogleCalendarEvents({
+      start: start.toISOString(),
+      end: end.toISOString(),
+      limit,
+    });
+
+    if (googleEvents) {
+      return {
+        provider: "google_calendar",
+        window: {
+          start: start.toISOString(),
+          end: end.toISOString(),
+        },
+        events: googleEvents,
+        availability: summarizeAvailability(
+          start,
+          end,
+          googleEvents.map((event) => ({
+            title: event.title,
+            startAt: new Date(event.startAt),
+            endAt: new Date(event.endAt),
+          }))
+        ),
+      };
+    }
+
     const events = await db
       .select({
         id: calendarEvents.id,
@@ -287,6 +321,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
       .limit(limit);
 
     return {
+      provider: "nicole_local",
       window: {
         start: start.toISOString(),
         end: end.toISOString(),
@@ -308,6 +343,22 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
     if (end <= start) {
       throw new Error("Event end must be after the start time.");
+    }
+
+    const googleEvent = await createGoogleCalendarEvent({
+      title,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      description,
+      location,
+    });
+
+    if (googleEvent) {
+      return {
+        provider: "google_calendar",
+        event: googleEvent,
+        conflicts: [],
+      };
     }
 
     const conflicts = await db
@@ -347,6 +398,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
       });
 
     return {
+      provider: "nicole_local",
       event: created[0],
       conflicts,
     };
@@ -382,6 +434,37 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
       });
 
     return { reminder: created[0] };
+  },
+  email_search: async (input) => {
+    const query = readRequiredString(input, "query");
+    const limit = readOptionalNumber(input, "limit", 8, 1, 20);
+    const results = await searchZohoMail({ query, limit });
+
+    if (results) {
+      return {
+        provider: "zoho_mail",
+        results,
+      };
+    }
+
+    throw new Error(
+      "Zoho Mail is not connected yet. Connect it from Integrations first."
+    );
+  },
+  email_send: async (input) => {
+    const to = readRequiredString(input, "to");
+    const subject = readRequiredString(input, "subject");
+    const body = readRequiredString(input, "body");
+    const cc = readOptionalString(input, "cc");
+    const result = await sendZohoMail({ to, subject, body, cc });
+
+    if (result) {
+      return result;
+    }
+
+    throw new Error(
+      "Zoho Mail is not connected yet. Connect it from Integrations first."
+    );
   },
   terminal_run: async (input) => {
     const command = readRequiredString(input, "command");
@@ -456,9 +539,10 @@ ${manifest}`;
 }
 
 export async function runDirectToolRouting(
-  message: string
+  message: string,
+  recentMessages: ChatMessage[] = []
 ): Promise<ToolExecutionResult[]> {
-  const directToolCall = detectDirectToolCall(message);
+  const directToolCall = detectDirectToolCall(message, recentMessages);
 
   if (!directToolCall) {
     return [];
@@ -708,7 +792,10 @@ export async function executeToolCall(
   }
 }
 
-function detectDirectToolCall(message: string): ToolCall | null {
+function detectDirectToolCall(
+  message: string,
+  recentMessages: ChatMessage[] = []
+): ToolCall | null {
   const trimmed = message.trim();
 
   if (!trimmed) {
@@ -716,13 +803,81 @@ function detectDirectToolCall(message: string): ToolCall | null {
   }
 
   return (
+    parseWebSearchToolCall(trimmed, recentMessages) ||
+    parseDeepResearchToolCall(trimmed, recentMessages) ||
     parseReminderToolCall(trimmed) ||
     parseCalendarCreateToolCall(trimmed) ||
     parseCalendarReadToolCall(trimmed) ||
+    parseEmailSearchToolCall(trimmed) ||
+    parseEmailSendToolCall(trimmed) ||
     parseGitStatusToolCall(trimmed) ||
     parseTerminalToolCall(trimmed) ||
     parseToolRegistryCall(trimmed)
   );
+}
+
+function parseWebSearchToolCall(
+  message: string,
+  recentMessages: ChatMessage[]
+): ToolCall | null {
+  const explicitMatch =
+    message.match(
+      /^(?:search the web|search web|web search|google|look up|lookup)\s+(?:for\s+)?(.+)$/i
+    ) ||
+    message.match(/^(?:who|what|where|when)\s+is\s+(.+)\??$/i);
+
+  if (explicitMatch) {
+    const query = cleanSearchQuery(explicitMatch[1]);
+    if (query) {
+      return {
+        name: "web_search",
+        arguments: { query, limit: 5 },
+      };
+    }
+  }
+
+  if (/^(?:google|look (?:him|her|them|it) up|search the web)\s+(?:him|her|them|it)\.?$/i.test(message)) {
+    const inferred = inferSearchQueryFromHistory(recentMessages);
+    if (inferred) {
+      return {
+        name: "web_search",
+        arguments: { query: inferred, limit: 5 },
+      };
+    }
+  }
+
+  return null;
+}
+
+function parseDeepResearchToolCall(
+  message: string,
+  recentMessages: ChatMessage[]
+): ToolCall | null {
+  const explicitMatch = message.match(
+    /^(?:research|deep research|look into|find out about)\s+(.+)$/i
+  );
+
+  if (explicitMatch) {
+    const query = cleanSearchQuery(explicitMatch[1]);
+    if (query) {
+      return {
+        name: "deep_research",
+        arguments: { query },
+      };
+    }
+  }
+
+  if (/^(?:research|look into)\s+(?:him|her|them|it)\.?$/i.test(message)) {
+    const inferred = inferSearchQueryFromHistory(recentMessages);
+    if (inferred) {
+      return {
+        name: "deep_research",
+        arguments: { query: inferred },
+      };
+    }
+  }
+
+  return null;
 }
 
 function parseToolRegistryCall(message: string): ToolCall | null {
@@ -862,6 +1017,55 @@ function parseReminderToolCall(message: string): ToolCall | null {
   };
 }
 
+function inferSearchQueryFromHistory(recentMessages: ChatMessage[]): string | null {
+  const candidates = [...recentMessages]
+    .reverse()
+    .filter((message) => message.role === "user")
+    .map((message) => message.content.trim());
+
+  for (const content of candidates) {
+    const explicit =
+      content.match(
+        /(?:search the web|search web|web search|google|look up|lookup)\s+(?:for\s+)?(.+)$/i
+      ) ||
+      content.match(/(?:who|what|where|when)\s+is\s+(.+)\??$/i) ||
+      content.match(/(?:research|deep research|look into|find out about)\s+(.+)$/i);
+
+    if (explicit) {
+      const cleaned = cleanSearchQuery(explicit[1]);
+      if (cleaned) {
+        return cleaned;
+      }
+    }
+
+    const namedEntity = extractLikelyProperNounQuery(content);
+    if (namedEntity) {
+      return namedEntity;
+    }
+  }
+
+  return null;
+}
+
+function cleanSearchQuery(value: string): string {
+  return value
+    .replace(/[?.!]+$/g, "")
+    .replace(/^who\s+/i, "")
+    .replace(/^what\s+/i, "")
+    .trim();
+}
+
+function extractLikelyProperNounQuery(content: string): string | null {
+  const match = content.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b/);
+
+  if (!match) {
+    return null;
+  }
+
+  const value = match[1].trim();
+  return value.length >= 3 ? value : null;
+}
+
 function parseGitStatusToolCall(message: string): ToolCall | null {
   if (
     /\bgit status\b/i.test(message) ||
@@ -873,6 +1077,49 @@ function parseGitStatusToolCall(message: string): ToolCall | null {
     return {
       name: "git_status",
       arguments: {},
+    };
+  }
+
+  return null;
+}
+
+function parseEmailSearchToolCall(message: string): ToolCall | null {
+  const match =
+    message.match(/^(?:search|find)\s+(?:my\s+)?email(?:s)?\s+(?:for|about)\s+(.+)$/i) ||
+    message.match(/^(?:search|find)\s+emails?\s+from\s+(.+)$/i);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    name: "email_search",
+    arguments: {
+      query: match[1].trim(),
+    },
+  };
+}
+
+function parseEmailSendToolCall(message: string): ToolCall | null {
+  const quoted = Array.from(message.matchAll(/"([^"]+)"/g)).map(
+    (match) => match[1]
+  );
+  const toMatch = message.match(
+    /\bto\s+([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i
+  );
+
+  if (
+    /\bsend (?:an )?email\b/i.test(message) &&
+    toMatch &&
+    quoted.length >= 2
+  ) {
+    return {
+      name: "email_send",
+      arguments: {
+        to: toMatch[1],
+        subject: quoted[0].trim(),
+        body: quoted[1].trim(),
+      },
     };
   }
 

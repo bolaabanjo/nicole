@@ -27,7 +27,7 @@ final class CompactWindowManager: ObservableObject {
           width: panelWidth,
           height: CompactPanelState.collapsedHeight
         ),
-        styleMask: [.borderless, .fullSizeContentView],
+        styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
         backing: .buffered,
         defer: false
       )
@@ -38,12 +38,24 @@ final class CompactWindowManager: ObservableObject {
       newPanel.isOpaque = false
       newPanel.backgroundColor = .clear
       newPanel.hasShadow = true
-      newPanel.level = .floating
-      newPanel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .transient]
+
+      // Window level high enough to float over full-screen apps
+      newPanel.level = NSWindow.Level(Int(CGShieldingWindowLevel()))
+
+      // canJoinAllSpaces: appear on every desktop/space
+      // fullScreenAuxiliary: appear over full-screen apps
+      // stationary: don't get dragged when switching spaces
+      newPanel.collectionBehavior = [
+        .canJoinAllSpaces,
+        .fullScreenAuxiliary,
+        .stationary,
+      ]
+
       newPanel.isMovableByWindowBackground = true
       newPanel.hidesOnDeactivate = false
       newPanel.animationBehavior = .utilityWindow
-      newPanel.hasShadow = true
+      newPanel.worksWhenModal = true
+      newPanel.isFloatingPanel = true
 
       let rootView = CompactView(
         settings: settings,
@@ -77,9 +89,8 @@ final class CompactWindowManager: ObservableObject {
     panelState.markShown()
     updatePanelHeight(panelState.currentHeight, animated: false)
 
-    NSApp.activate(ignoringOtherApps: true)
-    panel.makeKeyAndOrderFront(nil)
     panel.orderFrontRegardless()
+    panel.makeKeyAndOrderFront(nil)
   }
 
   func hidePanel() {
@@ -102,9 +113,10 @@ final class CompactWindowManager: ObservableObject {
     currentScreen = screen
     configureAnchorIfNeeded(for: screen)
 
-    let visibleFrame = screen.visibleFrame
-    let x = visibleFrame.midX - (panelWidth / 2)
-    let topEdge = anchorTopY ?? (visibleFrame.midY + 90)
+    // Use full frame (not visibleFrame) so it works in full-screen apps too
+    let frame = screen.frame
+    let x = frame.midX - (panelWidth / 2)
+    let topEdge = anchorTopY ?? (frame.midY + 90)
     let y = topEdge - clampedHeight
 
     let newFrame = NSRect(x: x, y: y, width: panelWidth, height: clampedHeight)
@@ -118,8 +130,8 @@ final class CompactWindowManager: ObservableObject {
 
   private func configureAnchorIfNeeded(for screen: NSScreen) {
     if currentScreen !== screen || anchorTopY == nil {
-      let visibleFrame = screen.visibleFrame
-      anchorTopY = visibleFrame.midY + 90
+      let frame = screen.frame
+      anchorTopY = frame.midY + 90
     }
   }
 
@@ -143,5 +155,5 @@ final class CompactWindowManager: ObservableObject {
 
 private final class KeyableCompactPanel: NSPanel {
   override var canBecomeKey: Bool { true }
-  override var canBecomeMain: Bool { true }
+  override var canBecomeMain: Bool { false }
 }

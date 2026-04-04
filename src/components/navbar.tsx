@@ -5,6 +5,17 @@ export function Navbar() {
         <a href="/" className="flex items-center gap-2" aria-label="Home">
           <span className="text-sm font-semibold text-foreground">Nicole</span>
         </a>
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <a href="/library" className="transition-colors hover:text-foreground">
+            Library
+          </a>
+          <a
+            href="/integrations"
+            className="transition-colors hover:text-foreground"
+          >
+            Integrations
+          </a>
+        </div>
       </div>
     </nav>
   );

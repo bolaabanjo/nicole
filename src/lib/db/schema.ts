@@ -177,6 +177,29 @@ export const toolInvocations = pgTable("tool_invocations", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Integration accounts: external providers Nicole can connect to
+export const integrationAccounts = pgTable(
+  "integration_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull(),
+    kind: text("kind").notNull(), // 'calendar' | 'email' | 'reminders'
+    status: text("status").notNull().default("connected"), // 'connected' | 'error' | 'revoked'
+    displayName: text("display_name"),
+    email: text("email"),
+    externalAccountId: text("external_account_id"),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    tokenType: text("token_type"),
+    scope: text("scope"),
+    tokenExpiresAt: timestamp("token_expires_at"),
+    metadata: jsonb("metadata"),
+    connectedAt: timestamp("connected_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => [uniqueIndex("integration_accounts_provider_unique").on(table.provider)]
+);
+
 // Calendar events: Nicole's local scheduling store
 export const calendarEvents = pgTable("calendar_events", {
   id: uuid("id").primaryKey().defaultRandom(),

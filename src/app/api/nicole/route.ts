@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
 
     // Build full prompt with search results if any
     let fullSystemPrompt = systemPrompt;
-    const toolResults = await runDirectToolRouting(message);
+    const toolResults = await runDirectToolRouting(message, recentMessages);
 
     if (toolResults.length === 0 && shouldAttemptToolUse(message)) {
       try {

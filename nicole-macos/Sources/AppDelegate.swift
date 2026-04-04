@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSApp.setActivationPolicy(.regular)
     NSApp.activate(ignoringOtherApps: true)
     installGlobalHotKey()
+    ScreenCapturePermissionManager.requestOnLaunch()
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -24,12 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func toggleNicolePanel() {
     Task { @MainActor in
-      let wasHidden = !CompactWindowManager.shared.isPanelVisible
       await WorkspaceContextProvider.captureExternalContext()
       CompactWindowManager.shared.togglePanel()
 
-      if wasHidden {
-        ScreenCapturePermissionManager.requestIfNeeded()
+      // Update context indicator after capture
+      if CompactWindowManager.shared.isPanelVisible {
+        CompactWindowManager.shared.panelState.refreshContextLabel()
       }
     }
   }
