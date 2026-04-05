@@ -20,16 +20,15 @@ import {
   summarizeOldConversations,
 } from "@/lib/ai/memory";
 import {
-  formatToolResultsForPrompt,
-  runDirectToolRouting,
-  runToolPlanningLoop,
-  shouldAttemptToolUse,
+  buildToolPromptBlock,
+  classifyIntent,
+  runIntentBasedTooling,
 } from "@/lib/ai/tools";
 import { loadRelevantSourceContext } from "@/lib/search/semantic";
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, context }: NicoleChatRequest = await req.json();
+    const { message, context, voice }: NicoleChatRequest = await req.json();
     const workspaceContext = normalizeWorkspaceContext(context);
     await requireTrustedDeviceForIOS(req, workspaceContext?.surface);
 
@@ -42,40 +41,55 @@ export async function POST(req: NextRequest) {
 
     await saveChatMessage("user", message);
 
-    const [memoryText, summaryText, recentMessages, sourceContext] = await Promise.all([
-      loadMemories(message),
-      loadConversationSummaryContext(),
-      loadRecentMessages(),
-      loadRelevantSourceContext(message, undefined, "personal"),
-    ]);
+    // 1. Classify intent deterministically — no LLM call
+    const recentMessages = await loadRecentMessages();
+    const intent = classifyIntent(message, recentMessages);
 
-    const systemPrompt = buildSystemPrompt({
+    // 2. Load context selectively based on intent
+    const contextLoaders: Promise<unknown>[] = [
+      loadConversationSummaryContext(),
+    ];
+
+    // Memory: ~50ms, cheap — load for anything non-casual
+    if (intent.shouldSearchMemory) {
+      contextLoaders.push(loadMemories(message));
+    } else {
+      contextLoaders.push(Promise.resolve(null));
+    }
+
+    // Sources: load when intent says so
+    if (intent.shouldSearchSources) {
+      contextLoaders.push(loadRelevantSourceContext(message, undefined, "personal"));
+    } else {
+      contextLoaders.push(Promise.resolve(null));
+    }
+
+    // 3. Run tools deterministically based on intent (in parallel with context)
+    contextLoaders.push(runIntentBasedTooling(intent, message, recentMessages));
+
+    const [summaryText, memoryText, sourceContext, toolResults] = (await Promise.all(
+      contextLoaders
+    )) as [string | null, string | null, string | null, import("@/lib/ai/tools").ToolExecutionResult[]];
+
+    // 4. Build system prompt with only the context we actually loaded
+    const systemPrompt = await buildSystemPrompt({
       conversationSummaries: summaryText || undefined,
-      memories: memoryText || undefined,
-      sourceContext: sourceContext || undefined,
+      memories: (memoryText as string) || undefined,
+      sourceContext: (sourceContext as string) || undefined,
       workspaceContext: formatWorkspaceContextForPrompt(workspaceContext),
     });
 
-    let fullSystemPrompt = systemPrompt;
-    const toolResults = await runDirectToolRouting(message, recentMessages);
+    let fullSystemPrompt = systemPrompt + buildToolPromptBlock(toolResults);
 
-    if (toolResults.length === 0 && shouldAttemptToolUse(message)) {
-      try {
-        const toolPlan = await runToolPlanningLoop({
-          systemPrompt,
-          recentMessages,
-          userMessage: message,
-        });
-        toolResults.push(...toolPlan.toolResults);
-      } catch (error) {
-        console.error("Tool planning failed, continuing without tools:", error);
-      }
-    }
-
-    const toolContext = formatToolResultsForPrompt(toolResults);
-
-    if (toolContext) {
-      fullSystemPrompt += `\n\n## Tool results\nNicole called tools before answering. CRITICAL RULES:\n- Base your answer ONLY on the tool results below. Do not invent, fabricate, or hallucinate information that is not in the results.\n- If the results are empty, irrelevant, or don't answer the question, say so honestly. Never make up a confident-sounding answer.\n- Summarize what the results actually say. Quote or paraphrase them, don't embellish.\n- Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
+    // Voice mode: add instruction to keep responses concise and conversational
+    if (voice) {
+      fullSystemPrompt += `\n\n## Voice mode active
+You are speaking out loud to Roy right now. Critical rules:
+- Keep responses SHORT — 1-3 sentences max unless the topic truly demands more.
+- Be conversational, not essay-like. No bullet points, no markdown, no headers.
+- Speak naturally as if talking face to face.
+- Don't say "according to my search" — just give the answer naturally.
+- If you have tool results, summarize them conversationally.`;
     }
 
     const fullMessages: ChatMessage[] = [
