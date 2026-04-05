@@ -3,9 +3,14 @@ import { ingest } from "@/lib/ingestion";
 import { SOURCE_SCOPES, SourceScope } from "@/lib/db/schema";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
+import {
+  requireTrustedDeviceForIOS,
+  TrustedDeviceAuthError,
+} from "@/lib/auth/trusted-devices";
 
 export async function POST(req: NextRequest) {
   try {
+    await requireTrustedDeviceForIOS(req);
     const formData = await req.formData();
     const type = formData.get("type") as string;
     const title = formData.get("title") as string;
@@ -70,6 +75,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ error: "Invalid type" }, { status: 400 });
   } catch (error) {
+    if (error instanceof TrustedDeviceAuthError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     console.error("Ingest error:", error);
     return NextResponse.json(
       { error: "Failed to ingest source" },

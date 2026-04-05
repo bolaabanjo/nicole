@@ -200,6 +200,26 @@ export const integrationAccounts = pgTable(
   (table) => [uniqueIndex("integration_accounts_provider_unique").on(table.provider)]
 );
 
+// Trusted devices: lightweight device-token auth for private mobile clients
+export const trustedDevices = pgTable(
+  "trusted_devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    platform: text("platform").notNull(), // 'ios' | 'macos' | 'web'
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    lastUsedAt: timestamp("last_used_at").defaultNow(),
+    revokedAt: timestamp("revoked_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("trusted_devices_token_hash_unique").on(table.tokenHash),
+    index("trusted_devices_platform_idx").on(table.platform),
+  ]
+);
+
 // Calendar events: Nicole's local scheduling store
 export const calendarEvents = pgTable("calendar_events", {
   id: uuid("id").primaryKey().defaultRandom(),

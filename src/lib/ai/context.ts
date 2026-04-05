@@ -1,4 +1,4 @@
-export type NicoleClientSurface = "web" | "pwa" | "macos";
+export type NicoleClientSurface = "web" | "pwa" | "macos" | "ios";
 
 export interface NicoleWorkspaceContext {
   surface?: NicoleClientSurface;
@@ -9,6 +9,11 @@ export interface NicoleWorkspaceContext {
   currentUrl?: string;
   currentFilePath?: string;
   visibleContent?: string;
+  visualSummary?: string;
+  visualElements?: string[];
+  visualIssues?: string[];
+  visualConfidence?: string;
+  captureNotes?: string;
   note?: string;
 }
 
@@ -32,6 +37,18 @@ function normalizeContextField(value: unknown): string | undefined {
   return trimmed.slice(0, MAX_CONTEXT_FIELD_LENGTH);
 }
 
+function normalizeContextList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value
+    .map((item) => normalizeContextField(item))
+    .filter((item): item is string => Boolean(item));
+
+  return normalized.length > 0 ? normalized.slice(0, 8) : undefined;
+}
+
 export function normalizeWorkspaceContext(
   value: unknown
 ): NicoleWorkspaceContext | undefined {
@@ -41,7 +58,10 @@ export function normalizeWorkspaceContext(
 
   const raw = value as Record<string, unknown>;
   const surface =
-    raw.surface === "web" || raw.surface === "pwa" || raw.surface === "macos"
+    raw.surface === "web" ||
+    raw.surface === "pwa" ||
+    raw.surface === "macos" ||
+    raw.surface === "ios"
       ? raw.surface
       : undefined;
 
@@ -54,6 +74,11 @@ export function normalizeWorkspaceContext(
     currentUrl: normalizeContextField(raw.currentUrl),
     currentFilePath: normalizeContextField(raw.currentFilePath),
     visibleContent: normalizeContextField(raw.visibleContent),
+    visualSummary: normalizeContextField(raw.visualSummary),
+    visualElements: normalizeContextList(raw.visualElements),
+    visualIssues: normalizeContextList(raw.visualIssues),
+    visualConfidence: normalizeContextField(raw.visualConfidence),
+    captureNotes: normalizeContextField(raw.captureNotes),
     note: normalizeContextField(raw.note),
   };
 
@@ -76,6 +101,11 @@ export function hasWorkspaceContext(
       context.currentUrl ||
       context.currentFilePath ||
       context.visibleContent ||
+      context.visualSummary ||
+      context.visualElements?.length ||
+      context.visualIssues?.length ||
+      context.visualConfidence ||
+      context.captureNotes ||
       context.note
   );
 }
@@ -96,6 +126,15 @@ export function formatWorkspaceContextForPrompt(
     context.selectedText ? `- Selected text:\n"""${context.selectedText}"""` : null,
     context.clipboardText ? `- Clipboard:\n"""${context.clipboardText}"""` : null,
     context.visibleContent ? `- Visible content:\n"""${context.visibleContent}"""` : null,
+    context.visualSummary ? `- Visual summary: ${context.visualSummary}` : null,
+    context.visualElements?.length
+      ? `- Important visual elements:\n${context.visualElements.map((item) => `  - ${item}`).join("\n")}`
+      : null,
+    context.visualIssues?.length
+      ? `- Possible visual issues:\n${context.visualIssues.map((item) => `  - ${item}`).join("\n")}`
+      : null,
+    context.visualConfidence ? `- Visual confidence: ${context.visualConfidence}` : null,
+    context.captureNotes ? `- Visual capture notes: ${context.captureNotes}` : null,
     context.note ? `- Client note: ${context.note}` : null,
   ].filter(Boolean);
 
