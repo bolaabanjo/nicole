@@ -4,6 +4,10 @@ import {
   NicoleChatRequest,
   normalizeWorkspaceContext,
 } from "@/lib/ai/context";
+import {
+  requireTrustedDeviceForIOS,
+  TrustedDeviceAuthError,
+} from "@/lib/auth/trusted-devices";
 import { chat } from "@/lib/ai/router";
 import { buildSystemPrompt } from "@/lib/ai/personality";
 import { ChatMessage } from "@/lib/ai/types";
@@ -27,6 +31,7 @@ export async function POST(req: NextRequest) {
   try {
     const { message, context }: NicoleChatRequest = await req.json();
     const workspaceContext = normalizeWorkspaceContext(context);
+    await requireTrustedDeviceForIOS(req, workspaceContext?.surface);
 
     if (!message?.trim()) {
       return NextResponse.json(
@@ -158,6 +163,9 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (error) {
+    if (error instanceof TrustedDeviceAuthError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     console.error("Nicole error:", error);
     return NextResponse.json(
       {
