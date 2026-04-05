@@ -62,7 +62,44 @@ struct NicoleWorkspaceContextPayload: Encodable, Sendable {
   let currentUrl: String?
   let currentFilePath: String?
   let visibleContent: String?
+  let visualSummary: String?
+  let visualElements: [String]?
+  let visualIssues: [String]?
+  let visualConfidence: String?
+  let captureNotes: String?
   let note: String?
+
+  init(
+    surface: String,
+    activeApp: String?,
+    windowTitle: String?,
+    selectedText: String?,
+    clipboardText: String?,
+    currentUrl: String?,
+    currentFilePath: String?,
+    visibleContent: String?,
+    visualSummary: String? = nil,
+    visualElements: [String]? = nil,
+    visualIssues: [String]? = nil,
+    visualConfidence: String? = nil,
+    captureNotes: String? = nil,
+    note: String?
+  ) {
+    self.surface = surface
+    self.activeApp = activeApp
+    self.windowTitle = windowTitle
+    self.selectedText = selectedText
+    self.clipboardText = clipboardText
+    self.currentUrl = currentUrl
+    self.currentFilePath = currentFilePath
+    self.visibleContent = visibleContent
+    self.visualSummary = visualSummary
+    self.visualElements = visualElements
+    self.visualIssues = visualIssues
+    self.visualConfidence = visualConfidence
+    self.captureNotes = captureNotes
+    self.note = note
+  }
 }
 
 extension NicoleWorkspaceContextPayload {
@@ -73,7 +110,10 @@ extension NicoleWorkspaceContextPayload {
       clipboardText != nil ||
       currentUrl != nil ||
       currentFilePath != nil ||
-      visibleContent != nil
+      visibleContent != nil ||
+      visualSummary != nil ||
+      visualElements != nil ||
+      visualIssues != nil
   }
 
   var summaryTitle: String {
@@ -121,6 +161,29 @@ extension NicoleWorkspaceContextPayload {
 struct NicoleChatRequestBody: Encodable, Sendable {
   let message: String
   let context: NicoleWorkspaceContextPayload?
+}
+
+struct NicoleVoiceRequestBody: Encodable, Sendable {
+  let message: String
+}
+
+struct NicoleVisionRequestBody: Encodable, Sendable {
+  let image: String
+  let question: String?
+}
+
+struct NicoleVisionAnalysis: Codable, Equatable, Sendable {
+  let summary: String
+  let visibleText: String?
+  let appOrSurface: String?
+  let importantElements: [String]
+  let possibleIssues: [String]
+  let confidence: String?
+  let captureNotes: String?
+}
+
+struct NicoleVisionAnalysisResponse: Decodable, Sendable {
+  let analysis: NicoleVisionAnalysis
 }
 
 struct NicoleIngestResult: Decodable, Sendable {
