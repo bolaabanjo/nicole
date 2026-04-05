@@ -129,3 +129,22 @@ struct NicoleIngestResult: Decodable, Sendable {
   let chunkCount: Int
   let embeddingsGenerated: Bool
 }
+
+struct TrustedDeviceCredentials: Codable, Equatable, Sendable {
+  let deviceId: String
+  let deviceToken: String
+  let deviceName: String
+  let platform: String
+}
+
+struct TrustedDeviceValidationResponse: Decodable, Sendable {
+  struct Device: Decodable, Sendable {
+    let id: String
+    let name: String
+    let platform: String
+  }
+
+  let valid: Bool
+  let device: Device?
+  let error: String?
+}

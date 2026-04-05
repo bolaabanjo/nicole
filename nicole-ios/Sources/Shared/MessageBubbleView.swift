@@ -128,20 +128,16 @@ extension Theme {
       FontSize(14)
       BackgroundColor(.white.opacity(0.1))
     }
-    .codeBlock { configuration in
-      ScrollView(.horizontal) {
-        configuration.label
-          .font(.system(size: 12, design: .monospaced))
-          .padding(12)
+      .codeBlock { configuration in
+        ScrollView(.horizontal) {
+          configuration.label
+            .font(.system(size: 12, design: .monospaced))
+            .padding(12)
+        }
+        .background(Color.white.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.vertical, 12)
       }
-      .background(Color.white.opacity(0.04))
-      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-      .overlay(
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-          .stroke(Color.white.opacity(0.08), lineWidth: 1)
-      )
-      .padding(.vertical, 12)
-    }
     .strong {
       FontWeight(.semibold)
     }

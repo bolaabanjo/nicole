@@ -9,6 +9,7 @@ struct MobileContentView: View {
     @State private var showFilePicker = false
     @State private var showSettings = false
     @State private var isRecording = false
+    @State private var voiceStatusText: String?
     @State private var speechRecognizer = SpeechRecognizer()
 
     private let maxContentWidth: CGFloat = 760
@@ -66,7 +67,7 @@ struct MobileContentView: View {
         .onAppear {
             if !settings.baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Task {
-                    await viewModel.loadHistory(baseURLString: settings.baseURLString)
+                    _ = await viewModel.connectMobileClient(settings: settings)
                 }
             } else {
                 showSettings = true
@@ -147,6 +148,13 @@ struct MobileContentView: View {
                 Text(error)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.red.opacity(0.8))
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 4)
+            }
+            if let voiceStatusText {
+                Text(voiceStatusText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.62))
                     .padding(.horizontal, 20)
                     .padding(.bottom, 4)
             }
@@ -237,15 +245,20 @@ struct MobileContentView: View {
     private var primaryStatusLine: String {
         switch viewModel.connectionState {
         case .idle:
-            return "Server URL not set."
+            return viewModel.isTrustedDevicePaired
+              ? "Ready for \(settings.serverDisplayName)"
+              : "Pair this iPhone with Banjo."
         case .connecting:
-            return "Connecting..."
+            return "Connecting to \(settings.serverDisplayName)…"
         case .connected:
+            if let trustedDeviceName = viewModel.trustedDeviceName {
+                return "Connected to \(settings.serverDisplayName) as \(trustedDeviceName)"
+            }
             return "Connected to \(settings.serverDisplayName)"
         case .syncing:
             return "Syncing..."
         case .failed:
-            return "Couldn't reach server"
+            return "Couldn't reach \(settings.serverDisplayName)"
         }
     }
 
@@ -255,6 +268,8 @@ struct MobileContentView: View {
 
     private func submitCurrentMessage() {
         guard !isSendDisabled else { return }
+        speechRecognizer.stop()
+        isRecording = false
         Task {
             await viewModel.send(baseURLString: settings.baseURLString, settings: settings)
         }
@@ -264,11 +279,14 @@ struct MobileContentView: View {
         if isRecording {
             speechRecognizer.stop()
             isRecording = false
+            voiceStatusText = nil
         } else {
-            speechRecognizer.start { transcript in
+            speechRecognizer.start { active, errorText in
+                isRecording = active
+                voiceStatusText = errorText
+            } onTranscript: { transcript in
                 viewModel.input = transcript
             }
-            isRecording = true
         }
     }
 }
@@ -285,22 +303,37 @@ struct MobileSettingsView: View {
             Form {
                 Section("Server") {
                     TextField("Server name", text: $settings.serverName)
-                    TextField("Server URL", text: $settings.baseURLString)
+                    TextField("Banjo URL (Tailscale)", text: $settings.baseURLString)
                         #if os(iOS)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         #endif
                         .autocorrectionDisabled()
+
+                    TextField("This iPhone's name", text: $settings.deviceName)
+
+                    SecureField("Pairing code", text: $settings.pairingCode)
+
+                    Text("Use Banjo's Tailscale-reachable Nicole URL here. The pairing code is a one-time trust step so this iPhone can talk to Nicole privately.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {
-                    Button("Connect") {
+                    Button(viewModel.isTrustedDevicePaired ? "Reconnect" : "Pair & Connect") {
                         dismiss()
                         Task {
-                            await viewModel.loadHistory(baseURLString: settings.baseURLString)
+                            _ = await viewModel.connectMobileClient(settings: settings)
                         }
                     }
                     .disabled(settings.baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if let trustedDeviceName = viewModel.trustedDeviceName {
+                    Section("Trusted Device") {
+                        Text("Paired as \(trustedDeviceName).")
+                            .font(.system(size: 13, weight: .medium))
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -370,14 +403,33 @@ final class SpeechRecognizer: ObservableObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
     private var onTranscript: ((String) -> Void)?
+    private var onStateChange: ((Bool, String?) -> Void)?
 
-    func start(onTranscript: @escaping (String) -> Void) {
+    func start(
+        onStateChange: @escaping (Bool, String?) -> Void,
+        onTranscript: @escaping (String) -> Void
+    ) {
+        self.onStateChange = onStateChange
         self.onTranscript = onTranscript
 
-        SFSpeechRecognizer.requestAuthorization { status in
-            guard status == .authorized else { return }
+        Task {
+            let speechGranted = await requestSpeechAuthorization()
+            guard speechGranted else {
+                await MainActor.run {
+                    onStateChange(false, "Allow Speech Recognition for Nicole in Settings.")
+                }
+                return
+            }
 
-            Task { @MainActor in
+            let micGranted = await requestMicrophoneAuthorization()
+            guard micGranted else {
+                await MainActor.run {
+                    onStateChange(false, "Allow microphone access for Nicole in Settings.")
+                }
+                return
+            }
+
+            await MainActor.run {
                 self.beginRecording()
             }
         }
@@ -385,11 +437,16 @@ final class SpeechRecognizer: ObservableObject {
 
     func stop() {
         audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        if audioEngine.inputNode.numberOfInputs > 0 {
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
         recognitionRequest = nil
         recognitionTask = nil
+        Task { @MainActor in
+            self.onStateChange?(false, nil)
+        }
     }
 
     private func beginRecording() {
@@ -400,17 +457,29 @@ final class SpeechRecognizer: ObservableObject {
             try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
+            onStateChange?(false, "Nicole couldn't start the microphone.")
             return
         }
 
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let recognitionRequest else { return }
+        guard let recognitionRequest else {
+            onStateChange?(false, "Nicole couldn't prepare speech recognition.")
+            return
+        }
         recognitionRequest.shouldReportPartialResults = true
+        recognitionRequest.requiresOnDeviceRecognition = false
+        onStateChange?(true, "Listening…")
 
         recognitionTask = recognizer?.recognitionTask(with: recognitionRequest) { [weak self] result, error in
             if let result {
                 Task { @MainActor in
                     self?.onTranscript?(result.bestTranscription.formattedString)
+                }
+            }
+
+            if let error {
+                Task { @MainActor in
+                    self?.onStateChange?(false, error.localizedDescription)
                 }
             }
 
@@ -431,13 +500,33 @@ final class SpeechRecognizer: ObservableObject {
         do {
             try audioEngine.start()
         } catch {
+            onStateChange?(false, "Nicole couldn't start the audio engine.")
             stop()
+        }
+    }
+
+    private func requestSpeechAuthorization() async -> Bool {
+        await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { status in
+                continuation.resume(returning: status == .authorized)
+            }
+        }
+    }
+
+    private func requestMicrophoneAuthorization() async -> Bool {
+        await withCheckedContinuation { continuation in
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                continuation.resume(returning: granted)
+            }
         }
     }
 }
 #else
 final class SpeechRecognizer: ObservableObject {
-    func start(onTranscript: @escaping (String) -> Void) {}
+    func start(
+        onStateChange: @escaping (Bool, String?) -> Void,
+        onTranscript: @escaping (String) -> Void
+    ) {}
     func stop() {}
 }
 #endif

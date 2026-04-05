@@ -19,9 +19,74 @@ final class ChatViewModel: ObservableObject {
   @Published var infoText: String?
   @Published var backendOrigin: String?
   @Published var lastRequestURL: String?
+  @Published private(set) var trustedDeviceName: String?
 
   private let apiClient = NicoleAPIClient()
   private var rawAssistantBuffers: [String: String] = [:]
+  private var trustedDeviceCredentials = DeviceCredentialStore.load()
+
+  init() {
+    trustedDeviceName = trustedDeviceCredentials?.deviceName
+  }
+
+  var isTrustedDevicePaired: Bool {
+    trustedDeviceCredentials != nil
+  }
+
+  func connectMobileClient(settings: AppSettings) async -> Bool {
+    guard let baseURLString = settings.normalizedBaseURLString else {
+      errorText = "Set Banjo's Tailscale URL in Settings first."
+      connectionState = .idle
+      return false
+    }
+
+    errorText = nil
+    infoText = nil
+
+    if let credentials = trustedDeviceCredentials {
+      do {
+        let validation = try await apiClient.validateTrustedDevice(
+          baseURLString: baseURLString,
+          credentials: credentials
+        )
+
+        if validation.valid {
+          trustedDeviceName = credentials.deviceName
+          infoText = "Connected to \(settings.serverDisplayName) as \(credentials.deviceName)."
+          await loadHistory(baseURLString: baseURLString)
+          return true
+        }
+      } catch {
+        DeviceCredentialStore.clear()
+        trustedDeviceCredentials = nil
+        trustedDeviceName = nil
+      }
+    }
+
+    guard let pairingCode = settings.normalizedPairingCode else {
+      errorText = "Enter Banjo's pairing code in Settings to pair this iPhone."
+      connectionState = .idle
+      return false
+    }
+
+    do {
+      let credentials = try await apiClient.registerTrustedDevice(
+        baseURLString: baseURLString,
+        pairingCode: pairingCode,
+        deviceName: settings.normalizedDeviceName
+      )
+      DeviceCredentialStore.save(credentials)
+      trustedDeviceCredentials = credentials
+      trustedDeviceName = credentials.deviceName
+      infoText = "Paired \(credentials.deviceName) with \(settings.serverDisplayName)."
+      await loadHistory(baseURLString: baseURLString)
+      return true
+    } catch {
+      errorText = error.localizedDescription
+      connectionState = .failed(error.localizedDescription)
+      return false
+    }
+  }
 
   func loadHistory(baseURLString: String) async {
     guard !baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -37,7 +102,10 @@ final class ChatViewModel: ObservableObject {
     lastRequestURL = try? await apiClient.historyURLString(baseURLString: baseURLString)
 
     do {
-      let loadedMessages = try await apiClient.fetchHistory(baseURLString: baseURLString)
+      let loadedMessages = try await apiClient.fetchHistory(
+        baseURLString: baseURLString,
+        credentials: trustedDeviceCredentials
+      )
       messages = loadedMessages.filter { $0.role != .system }
       connectionState = .connected(messageCount: messages.count)
     } catch {
@@ -68,7 +136,8 @@ final class ChatViewModel: ObservableObject {
       do {
         let result = try await apiClient.ingestFile(
           baseURLString: baseURLString,
-          fileURL: attachmentURL
+          fileURL: attachmentURL,
+          credentials: trustedDeviceCredentials
         )
         infoText = "Added \(result.title) to Nicole's library."
 
@@ -174,7 +243,8 @@ final class ChatViewModel: ObservableObject {
       try await apiClient.streamReply(
         baseURLString: baseURLString,
         message: message,
-        context: context
+        context: context,
+        credentials: trustedDeviceCredentials
       ) { [weak self] chunk in
         await self?.appendAssistantChunk(chunk, assistantID: assistantID)
       }

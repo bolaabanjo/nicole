@@ -1,74 +1,16 @@
 import Foundation
 
+#if os(iOS)
+import UIKit
+#endif
+
 @MainActor
 final class AppSettings: ObservableObject {
-  enum WindowMode: String, CaseIterable, Identifiable {
-    case compact
-    case expanded
-
-    var id: String { rawValue }
-
-    var title: String {
-      switch self {
-      case .compact:
-        return "Compact"
-      case .expanded:
-        return "Expanded"
-      }
-    }
-
-    var idealWidth: Double {
-      switch self {
-      case .compact:
-        return 620
-      case .expanded:
-        return 1180
-      }
-    }
-
-    var minimumWidth: Double {
-      switch self {
-      case .compact:
-        return 560
-      case .expanded:
-        return 980
-      }
-    }
-
-    var minimumHeight: Double {
-      switch self {
-      case .compact:
-        return 680
-      case .expanded:
-        return 760
-      }
-    }
-
-    var chatCanvasWidth: Double {
-      switch self {
-      case .compact:
-        return 760
-      case .expanded:
-        return 860
-      }
-
-    }
-
-    var usesSidebar: Bool {
-      switch self {
-      case .compact:
-        return false
-      case .expanded:
-        return true
-      }
-    }
-  }
-
   private enum Keys {
-    static let serverName = "nicole.macos.server-name"
-    static let baseURL = "nicole.macos.base-url"
-    static let windowMode = "nicole.macos.window-mode"
-    static let includeClipboard = "nicole.macos.include-clipboard"
+    static let serverName = "nicole.mobile.server-name"
+    static let baseURL = "nicole.mobile.base-url"
+    static let deviceName = "nicole.mobile.device-name"
+    static let pairingCode = "nicole.mobile.pairing-code"
   }
 
   @Published var serverName: String {
@@ -83,15 +25,15 @@ final class AppSettings: ObservableObject {
     }
   }
 
-  @Published var windowMode: WindowMode {
+  @Published var deviceName: String {
     didSet {
-      UserDefaults.standard.set(windowMode.rawValue, forKey: Keys.windowMode)
+      UserDefaults.standard.set(deviceName, forKey: Keys.deviceName)
     }
   }
 
-  @Published var includeClipboard: Bool {
+  @Published var pairingCode: String {
     didSet {
-      UserDefaults.standard.set(includeClipboard, forKey: Keys.includeClipboard)
+      UserDefaults.standard.set(pairingCode, forKey: Keys.pairingCode)
     }
   }
 
@@ -102,6 +44,16 @@ final class AppSettings: ObservableObject {
 
   var normalizedBaseURLString: String? {
     let trimmed = baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  var normalizedDeviceName: String {
+    let trimmed = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? defaultDeviceName : trimmed
+  }
+
+  var normalizedPairingCode: String? {
+    let trimmed = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
   }
 
@@ -123,20 +75,32 @@ final class AppSettings: ObservableObject {
   }
 
   var serverDisplayName: String {
-    trimmedServerName ?? derivedHostLabel ?? "Nicole server"
+    trimmedServerName ?? derivedHostLabel ?? "Banjo"
   }
 
   init() {
-    let storedServerName = UserDefaults.standard.string(forKey: Keys.serverName) ?? ""
-    self.serverName = storedServerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let defaults = UserDefaults.standard
+    let storedServerName = defaults.string(forKey: Keys.serverName) ?? ""
+    serverName =
+      storedServerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       ? "Banjo"
       : storedServerName
-    self.baseURLString =
-      UserDefaults.standard.string(forKey: Keys.baseURL) ?? ""
-    self.windowMode =
-      WindowMode(rawValue: UserDefaults.standard.string(forKey: Keys.windowMode) ?? "")
-      ?? .expanded
-    self.includeClipboard =
-      UserDefaults.standard.object(forKey: Keys.includeClipboard) as? Bool ?? true
+    baseURLString = defaults.string(forKey: Keys.baseURL) ?? ""
+
+    let storedDeviceName = defaults.string(forKey: Keys.deviceName) ?? ""
+    deviceName =
+      storedDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      ? defaultDeviceName
+      : storedDeviceName
+
+    pairingCode = defaults.string(forKey: Keys.pairingCode) ?? ""
   }
 }
+
+private let defaultDeviceName: String = {
+  #if os(iOS)
+  UIDevice.current.name
+  #else
+  Host.current().localizedName ?? "Nicole Phone"
+  #endif
+}()
