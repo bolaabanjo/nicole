@@ -208,6 +208,8 @@ export async function extractAndStoreMemories(
     const extracted = JSON.parse(cleaned);
 
     if (Array.isArray(extracted) && extracted.length > 0) {
+      const highImportance: string[] = [];
+
       for (const mem of extracted) {
         if (mem.content && mem.category) {
           await storeMemory({
@@ -220,6 +222,23 @@ export async function extractAndStoreMemories(
                 ? mem.topic.trim()
                 : undefined,
           });
+
+          // Also log high-importance memories to the daily workspace file
+          if ((mem.importance || 5) >= 7) {
+            highImportance.push(mem.content);
+          }
+        }
+      }
+
+      // Write notable memories to ~/.nicole/memory/YYYY-MM-DD.md
+      if (highImportance.length > 0) {
+        try {
+          const { appendToDailyMemory } = await import("./workspace");
+          for (const entry of highImportance) {
+            await appendToDailyMemory(entry);
+          }
+        } catch {
+          // Workspace write is best-effort
         }
       }
     }
