@@ -207,9 +207,12 @@ final class ChatViewModel: ObservableObject {
     }
 
     do {
-      try await apiClient.streamVoiceReply(
+      // Voice now goes through /stream with voice=true for full tool capabilities
+      try await apiClient.streamReply(
         baseURLString: baseURLString,
-        message: trimmed
+        message: trimmed,
+        context: nil,
+        voice: true
       ) { [weak self] chunk in
         await self?.appendAssistantChunk(chunk, assistantID: assistantID)
       }

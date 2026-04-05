@@ -116,9 +116,10 @@ actor NicoleAPIClient {
     baseURLString: String,
     message: String,
     context: NicoleWorkspaceContextPayload?,
+    voice: Bool = false,
     onChunk: @escaping @Sendable (String) async -> Void
   ) async throws {
-    let body = NicoleChatRequestBody(message: message, context: context)
+    let body = NicoleChatRequestBody(message: message, context: context, voice: voice ? true : nil)
     let request = try makeJSONRequest(
       baseURLString: baseURLString,
       path: "/api/nicole/stream",

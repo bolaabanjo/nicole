@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   weak var settings: AppSettings?
   weak var viewModel: ChatViewModel?
   weak var voiceController: NicoleVoiceController?
+  weak var heartbeatController: NicoleHeartbeatController?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -31,17 +32,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     settingsCancellable?.cancel()
     wakeWordController.stop()
+    heartbeatController?.stop()
   }
 
   func configure(
     settings: AppSettings,
     viewModel: ChatViewModel,
-    voiceController: NicoleVoiceController
+    voiceController: NicoleVoiceController,
+    heartbeatController: NicoleHeartbeatController
   ) {
     self.settings = settings
     self.viewModel = viewModel
     self.voiceController = voiceController
+    self.heartbeatController = heartbeatController
     viewModel.attachVoiceController(voiceController)
+
+    // Start the heartbeat — Nicole checks in proactively
+    heartbeatController.start(settings: settings, voiceController: voiceController)
 
     settingsCancellable?.cancel()
     settingsCancellable = settings.$alwaysOnVoiceEnabled
@@ -84,6 +91,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  /// Acknowledgments Nicole says when summoned. Shuffled so she doesn't repeat.
+  private var wakeAcknowledgmentQueue: [String] = []
+
+  private static let allAcknowledgments = [
+    // Casual
+    "Yes, Roy?",
+    "Hey, what's up?",
+    "Yeah?",
+    "What's good?",
+    "Hmm?",
+    "I'm here.",
+    "Go ahead.",
+    "What do you need?",
+    "Talk to me.",
+    // Playful
+    "You called?",
+    "At your service.",
+    "I was just thinking about something, but go ahead.",
+    "Perfect timing.",
+    "What's on your mind?",
+    "I'm all ears.",
+    // Warm
+    "Hey Roy.",
+    "I'm listening.",
+    "Right here.",
+    "What can I do for you?",
+  ]
+
+  private func nextAcknowledgment() -> String {
+    if wakeAcknowledgmentQueue.isEmpty {
+      wakeAcknowledgmentQueue = Self.allAcknowledgments.shuffled()
+    }
+    return wakeAcknowledgmentQueue.removeFirst()
+  }
+
   private func handleWakeWordDetection(initialCommand: NicoleWakeWordController.Detection) async {
     guard let settings, let viewModel, let voiceController else { return }
 
@@ -110,6 +152,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       break
     }
 
+    // Nicole acknowledges she heard the wake word before listening
+    let ack = nextAcknowledgment()
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+      KokoroSpeaker.shared.speak(text: ack) {
+        continuation.resume()
+      }
+    }
+
     voiceController.startAmbientCapture { [weak self] transcript in
       guard let self else { return }
 
@@ -128,6 +178,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
       }
     }
+  }
+
+  // MARK: - Voice status phrases (spoken while tools execute)
+
+  /// Lightweight intent detection for voice — determines if a tool will run
+  /// and what status phrase to speak while waiting.
+  private static func voiceStatusPhrase(for message: String) -> String? {
+    let lower = message.lowercased()
+
+    // Web search
+    if lower.hasPrefix("who is ") || lower.hasPrefix("who are ") ||
+       lower.hasPrefix("what is ") || lower.hasPrefix("what are ") ||
+       lower.hasPrefix("where is ") || lower.hasPrefix("when is ") ||
+       lower.hasPrefix("tell me about ") || lower.hasPrefix("what do you know about ") ||
+       lower.contains("search") || lower.contains("look up") || lower.contains("google") {
+      return [
+        "Let me look that up.",
+        "One sec, searching now.",
+        "Let me find that for you.",
+        "Searching...",
+        "Hold on, let me check.",
+      ].randomElement()!
+    }
+
+    // Calendar
+    if lower.contains("calendar") || lower.contains("schedule") || lower.contains("meeting") ||
+       lower.contains("am i free") || lower.contains("what do i have") {
+      return [
+        "Let me check your calendar.",
+        "Checking your schedule.",
+        "One sec, pulling up your calendar.",
+      ].randomElement()!
+    }
+
+    // Reminders
+    if lower.contains("remind me") || lower.contains("set a reminder") || lower.contains("reminder") {
+      return [
+        "Setting that up for you.",
+        "On it.",
+        "Got it, one moment.",
+      ].randomElement()!
+    }
+
+    // Email
+    if lower.contains("email") || lower.contains("inbox") || lower.contains("send") {
+      return [
+        "Let me check on that.",
+        "One moment.",
+      ].randomElement()!
+    }
+
+    // Sources / notes
+    if lower.contains("notes") || lower.contains("pdf") || lower.contains("document") ||
+       lower.contains("source") || lower.contains("paper") {
+      return [
+        "Let me check your notes.",
+        "Looking through your sources.",
+        "One sec.",
+      ].randomElement()!
+    }
+
+    // Current info keywords
+    if lower.contains("latest") || lower.contains("news") || lower.contains("today") ||
+       lower.contains("weather") || lower.contains("price") || lower.contains("score") ||
+       lower.contains("update") || lower.contains("recent") {
+      return [
+        "Let me check on that.",
+        "One sec, looking that up.",
+        "Searching for the latest info.",
+      ].randomElement()!
+    }
+
+    // Long questions probably need processing time
+    if lower.hasSuffix("?") && lower.count > 30 {
+      return [
+        "Let me think about that.",
+        "Good question, give me a second.",
+        "Hmm, let me think.",
+      ].randomElement()!
+    }
+
+    // Short/casual — no status needed, response will be fast
+    return nil
   }
 
   private static let visionTriggers = [
@@ -149,11 +282,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     viewModel: ChatViewModel,
     voiceController: NicoleVoiceController
   ) async {
+    // Check if this command will trigger tools — if so, speak a status phrase
+    // while the server processes (runs in parallel with the server request)
+    if let statusPhrase = Self.voiceStatusPhrase(for: command) {
+      // Speak the status phrase and wait for it to finish before starting streaming TTS
+      await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        KokoroSpeaker.shared.speak(text: statusPhrase) {
+          continuation.resume()
+        }
+      }
+    }
+
     // Start streaming TTS — Nicole will begin speaking as soon as the first
     // sentence arrives, while the rest of the response is still generating.
     voiceController.beginStreamingTTS { [weak self] in
       Task { @MainActor in
+        // TTS finished naturally — stop interrupt monitoring and start next turn
+        voiceController.stopInterruptMonitoring()
         await self?.startConversationTurn()
+      }
+    }
+
+    // Monitor the mic while Nicole speaks — if the user talks over her, interrupt
+    voiceController.startInterruptMonitoring { [weak self] capturedAudio in
+      guard let self else { return }
+
+      Task { @MainActor in
+        // User interrupted — stop Nicole mid-sentence
+        voiceController.cancelStreamingTTS()
+        KokoroSpeaker.shared.stopSpeaking()
+
+        // Now capture the rest of what the user is saying
+        voiceController.startAmbientCapture { [weak self] transcript in
+          guard let self else { return }
+
+          Task { @MainActor in
+            let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+              await self.startConversationTurn()
+              return
+            }
+
+            await self.sendAmbientVoiceCommand(
+              trimmed,
+              settings: settings,
+              viewModel: viewModel,
+              voiceController: voiceController
+            )
+          }
+        }
       }
     }
 
@@ -175,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     if response == nil {
+      voiceController.stopInterruptMonitoring()
       voiceController.cancelStreamingTTS()
       await resumeWakeWordListeningIfNeeded()
     }

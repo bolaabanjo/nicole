@@ -161,6 +161,7 @@ extension NicoleWorkspaceContextPayload {
 struct NicoleChatRequestBody: Encodable, Sendable {
   let message: String
   let context: NicoleWorkspaceContextPayload?
+  var voice: Bool?
 }
 
 struct NicoleVoiceRequestBody: Encodable, Sendable {
