@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 @preconcurrency import ScreenCaptureKit
@@ -7,6 +8,47 @@ actor ScreenEnrichmentEngine {
   static let shared = ScreenEnrichmentEngine()
 
   private init() {}
+
+  /// Capture the current screen as a base64-encoded JPEG for vision model input.
+  func captureScreenAsBase64() async -> String? {
+    do {
+      let content = try await shareableContent()
+      guard let display = content.displays.first else { return nil }
+
+      // Exclude Nicole's own windows
+      let nicoleBundle = Bundle.main.bundleIdentifier ?? ""
+      let otherApps = content.applications.filter { $0.bundleIdentifier != nicoleBundle }
+
+      let filter = SCContentFilter(
+        display: display,
+        including: otherApps,
+        exceptingWindows: []
+      )
+
+      let config = SCStreamConfiguration()
+      config.showsCursor = false
+      // Capture at 1x resolution to keep the image small for the vision model
+      config.width = Int(display.width)
+      config.height = Int(display.height)
+
+      guard let cgImage = try await captureImage(filter: filter, configuration: config) else {
+        return nil
+      }
+
+      // Convert to JPEG data at moderate quality
+      let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+      guard let jpegData = bitmapRep.representation(
+        using: .jpeg,
+        properties: [.compressionFactor: 0.6]
+      ) else {
+        return nil
+      }
+
+      return jpegData.base64EncodedString()
+    } catch {
+      return nil
+    }
+  }
 
   func enrichAndStoreVisibleText(from fastSnapshot: FastWorkspaceSnapshot) async {
     // Don't gate on CGPreflightScreenCaptureAccess() — it returns false
