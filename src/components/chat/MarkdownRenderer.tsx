@@ -87,8 +87,8 @@ export function MarkdownRenderer({ content }: { content: string }) {
                             const language = match?.[1] || "code";
 
                             return (
-                                <div className="my-3 w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-muted/30 dark:bg-[#1e1e1e]">
-                                    <div className="flex items-center justify-between px-3 py-1.5 bg-muted/50 dark:bg-white/5 border-b border-border/50 dark:border-white/5">
+                                <div className="my-3 w-full max-w-full overflow-hidden rounded-lg bg-muted/30 dark:bg-[#1e1e1e]">
+                                    <div className="flex items-center justify-between px-3 py-1.5 bg-muted/50 dark:bg-white/5 border-b border-border/10 dark:border-white/5">
                                         <span className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider">{language}</span>
                                         <button onClick={() => copyCode(codeString)} className="text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
                                             <Copy className="h-3 w-3" />
@@ -108,15 +108,15 @@ export function MarkdownRenderer({ content }: { content: string }) {
                         );
                     },
                     table: ({ node: _node, ...props }) => (
-                        <div className="my-4 w-full overflow-x-auto rounded-lg border border-border/50">
+                        <div className="my-4 w-full overflow-x-auto rounded-lg">
                             <table className="w-full border-collapse text-sm" {...props} />
                         </div>
                     ),
                     thead: ({ node: _node, ...props }) => (
-                        <thead className="bg-muted/50 border-b border-border/50" {...props} />
+                        <thead className="bg-muted/50 border-b border-border/10" {...props} />
                     ),
                     tbody: ({ node: _node, ...props }) => (
-                        <tbody className="divide-y divide-border/50" {...props} />
+                        <tbody className="divide-y divide-border/10" {...props} />
                     ),
                     tr: ({ node: _node, ...props }) => (
                         <tr className="hover:bg-muted/30 transition-colors" {...props} />
@@ -163,7 +163,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
                     blockquote: ({ node: _node, ...props }) => (
                         <blockquote className="border-l-4 border-primary/30 pl-4 py-1 my-4 italic text-muted-foreground bg-muted/10 rounded-r" {...props} />
                     ),
-                    hr: ({ node: _node, ...props }) => <hr className="my-6 border-border/50" {...props} />,
+                    hr: ({ node: _node, ...props }) => <hr className="my-6 border-border/10" {...props} />,
                     strong: ({ node: _node, ...props }) => (
                         <strong className="font-bold text-foreground" {...props} />
                     ),
