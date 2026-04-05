@@ -2,11 +2,16 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 
 const SEARXNG_URL = process.env.SEARXNG_URL || "http://localhost:8888";
-const SEARXNG_ENGINES = process.env.SEARXNG_ENGINES || "google";
+const SEARXNG_ENGINES = process.env.SEARXNG_ENGINES || "";
 const ALLOW_NON_GOOGLE_SEARCH_FALLBACK =
   process.env.ALLOW_NON_GOOGLE_SEARCH_FALLBACK?.trim().toLowerCase() === "true";
+const HEALTH_CHECK_TIMEOUT_MS = 3_000;
+const HEALTH_CACHE_TTL_MS = 5_000;
 const FETCH_TIMEOUT_MS = 15_000;
+const SEARCH_TIMEOUT_MS = 10_000;
+const MIN_STRONG_SEARCH_RESULTS = 2;
 const MAX_WORDS = 4000;
+let searxngHealthCache: { checkedAt: number; available: boolean } | null = null;
 
 const FETCH_HEADERS = {
   "User-Agent":
@@ -24,7 +29,10 @@ export interface SearchResult {
 export interface SearchResponse {
   results: SearchResult[];
   provider: "google" | "duckduckgo";
+  status: "ok" | "weak" | "unavailable";
+  liveSearchAvailable: boolean;
   error?: string;
+  warning?: string;
 }
 
 export interface PageContent {
@@ -47,11 +55,14 @@ async function searchSearXNG(
     q: query,
     format: "json",
     categories,
-    engines: SEARXNG_ENGINES,
   });
 
+  if (SEARXNG_ENGINES) {
+    params.set("engines", SEARXNG_ENGINES);
+  }
+
   const res = await fetch(`${SEARXNG_URL}/search?${params}`, {
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -59,18 +70,38 @@ async function searchSearXNG(
   }
 
   const data = await res.json();
-  const results = (data.results || []).slice(0, limit).map((r: any) => ({
-    title: r.title || "",
-    url: r.url || "",
-    content: r.content || "",
-  }));
+  const results = normalizeSearchResults(data.results, limit, query);
 
-  console.log(`[SearXNG] query="${query}" → ${results.length} results from ${SEARXNG_ENGINES}${results.length === 0 ? " (EMPTY)" : ""}`);
+  console.log(`[SearXNG] query="${query}" → ${results.length} results from ${SEARXNG_ENGINES || "all engines"}${results.length === 0 ? " (EMPTY)" : ""}`);
   if (results.length > 0) {
     console.log(`[SearXNG] top result: "${results[0].title}" → ${results[0].url}`);
   }
 
   return results;
+}
+
+async function checkSearXNGAvailability(): Promise<boolean> {
+  const now = Date.now();
+
+  if (
+    searxngHealthCache &&
+    now - searxngHealthCache.checkedAt < HEALTH_CACHE_TTL_MS
+  ) {
+    return searxngHealthCache.available;
+  }
+
+  try {
+    const res = await fetch(SEARXNG_URL, {
+      signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
+      redirect: "follow",
+    });
+    const available = res.ok;
+    searxngHealthCache = { checkedAt: now, available };
+    return available;
+  } catch {
+    searxngHealthCache = { checkedAt: now, available: false };
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +164,7 @@ async function searchDuckDuckGo(
     }
   }
 
-  return results;
+  return normalizeSearchResults(results, limit, query);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,29 +179,224 @@ export async function searchWeb(
   limit = 5,
   categories = "general"
 ): Promise<SearchResponse> {
+  const searxngAvailable = await checkSearXNGAvailability();
+
+  if (!searxngAvailable) {
+    const fallback = await tryDuckDuckGoFallback(query, limit);
+    if (fallback) {
+      return fallback;
+    }
+
+    return {
+      results: [],
+      provider: "google",
+      status: "unavailable",
+      liveSearchAvailable: false,
+      error: "Live Google search is unavailable right now.",
+      warning: "Live Google search is unavailable right now.",
+    };
+  }
+
   // 1. Google via SearXNG
   try {
     const results = await searchSearXNG(query, limit, categories);
-    return { results, provider: "google" };
+    if (results.length === 0) {
+      return {
+        results,
+        provider: "google",
+        status: "weak",
+        liveSearchAvailable: true,
+        warning: "Live Google search returned no usable results.",
+      };
+    }
+
+    if (results.length < Math.min(limit, MIN_STRONG_SEARCH_RESULTS)) {
+      return {
+        results,
+        provider: "google",
+        status: "weak",
+        liveSearchAvailable: true,
+        warning: "Live Google search returned thin or inconclusive results.",
+      };
+    }
+
+    return {
+      results,
+      provider: "google",
+      status: "ok",
+      liveSearchAvailable: true,
+    };
   } catch (error) {
     console.error("Google search via SearXNG failed:", error);
+    searxngHealthCache = { checkedAt: Date.now(), available: false };
   }
 
   // 2. DuckDuckGo fallback
-  if (ALLOW_NON_GOOGLE_SEARCH_FALLBACK) {
-    try {
-      const results = await searchDuckDuckGo(query, limit);
-      return { results, provider: "duckduckgo" };
-    } catch (error) {
-      console.error("DuckDuckGo fallback also failed:", error);
-    }
+  const fallback = await tryDuckDuckGoFallback(query, limit);
+  if (fallback) {
+    return fallback;
   }
 
   return {
     results: [],
     provider: "google",
-    error: "Google search via SearXNG is unavailable.",
+    status: "unavailable",
+    liveSearchAvailable: false,
+    error: "Live Google search is unavailable right now.",
+    warning: "Live Google search is unavailable right now.",
   };
+}
+
+async function tryDuckDuckGoFallback(
+  query: string,
+  limit: number
+): Promise<SearchResponse | null> {
+  if (!ALLOW_NON_GOOGLE_SEARCH_FALLBACK) {
+    return null;
+  }
+
+  try {
+    const results = await searchDuckDuckGo(query, limit);
+    if (results.length === 0) {
+      return {
+        results,
+        provider: "duckduckgo",
+        status: "weak",
+        liveSearchAvailable: false,
+        warning:
+          "Live Google search was unavailable and the non-Google fallback returned no usable results.",
+      };
+    }
+
+    return {
+      results,
+      provider: "duckduckgo",
+      status:
+        results.length < Math.min(limit, MIN_STRONG_SEARCH_RESULTS)
+          ? "weak"
+          : "ok",
+      liveSearchAvailable: false,
+      warning:
+        "Live Google search was unavailable, so these results came from a non-Google fallback.",
+    };
+  } catch (error) {
+    console.error("DuckDuckGo fallback also failed:", error);
+    return null;
+  }
+}
+
+function normalizeSearchResults(rawResults: unknown, limit: number, query = ""): SearchResult[] {
+  if (!Array.isArray(rawResults)) {
+    return [];
+  }
+
+  // 1. Parse all raw results
+  const parsed: SearchResult[] = [];
+  for (const rawResult of rawResults) {
+    const result = {
+      title:
+        rawResult && typeof rawResult === "object" && "title" in rawResult
+          ? String((rawResult as { title?: unknown }).title || "").trim()
+          : "",
+      url:
+        rawResult && typeof rawResult === "object" && "url" in rawResult
+          ? String((rawResult as { url?: unknown }).url || "").trim()
+          : "",
+      content:
+        rawResult && typeof rawResult === "object" && "content" in rawResult
+          ? String((rawResult as { content?: unknown }).content || "").trim()
+          : "",
+    };
+
+    if (isUsableSearchResult(result)) {
+      parsed.push(result);
+    }
+  }
+
+  // 2. Score by relevance to query
+  const queryTerms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 2);
+  const scored = parsed.map((result) => ({
+    result,
+    score: scoreResult(result, queryTerms),
+  }));
+
+  // Sort by score descending
+  scored.sort((a, b) => b.score - a.score);
+
+  // 3. Dedupe by domain — keep the highest-scored result per domain
+  const seenDomains = new Set<string>();
+  const seenUrls = new Set<string>();
+  const results: SearchResult[] = [];
+
+  for (const { result } of scored) {
+    const urlKey = result.url.replace(/\/$/, "");
+    if (seenUrls.has(urlKey)) continue;
+    seenUrls.add(urlKey);
+
+    const domain = extractDomain(result.url);
+    if (domain && seenDomains.has(domain)) continue;
+    if (domain) seenDomains.add(domain);
+
+    results.push(result);
+    if (results.length >= limit) break;
+  }
+
+  return results;
+}
+
+function scoreResult(result: SearchResult, queryTerms: string[]): number {
+  if (queryTerms.length === 0) return 0;
+
+  const titleLower = result.title.toLowerCase();
+  const contentLower = result.content.toLowerCase();
+  const urlLower = result.url.toLowerCase();
+  let score = 0;
+
+  for (const term of queryTerms) {
+    // Title matches are most valuable
+    if (titleLower.includes(term)) score += 3;
+    // URL matches (domain/path) are strong signals
+    if (urlLower.includes(term)) score += 2;
+    // Content/snippet matches
+    if (contentLower.includes(term)) score += 1;
+  }
+
+  // Bonus: title contains the full query as a phrase
+  const fullQuery = queryTerms.join(" ");
+  if (titleLower.includes(fullQuery)) score += 5;
+
+  // Bonus: shorter, more focused content tends to be more relevant
+  if (result.content.length > 20) score += 1;
+
+  return score;
+}
+
+function extractDomain(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    // Strip www. and collapse to registrable domain (simple version)
+    const parts = host.replace(/^www\./, "").split(".");
+    return parts.length >= 2 ? parts.slice(-2).join(".") : host;
+  } catch {
+    return null;
+  }
+}
+
+function isUsableSearchResult(result: SearchResult): boolean {
+  if (result.title.trim().length < 2 || result.url.trim().length < 8) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(result.url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return result.title.trim().toLowerCase() !== result.url.trim().toLowerCase();
 }
 
 // ---------------------------------------------------------------------------
