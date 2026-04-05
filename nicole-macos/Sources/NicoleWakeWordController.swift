@@ -1,8 +1,7 @@
 import AVFoundation
-import Speech
 
 @MainActor
-final class NicoleWakeWordController: NSObject, ObservableObject {
+final class NicoleWakeWordController: NSObject, ObservableObject, AudioConsumer {
   enum Detection {
     case wakeOnly
     case command(String)
@@ -17,14 +16,24 @@ final class NicoleWakeWordController: NSObject, ObservableObject {
 
   @Published private(set) var state: State = .idle
 
-  private let audioEngine = AVAudioEngine()
-  private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) ?? SFSpeechRecognizer()
-
-  private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-  private var recognitionTask: SFSpeechRecognitionTask?
   private var shouldRemainListening = false
   private var wakeSink: ((Detection) -> Void)?
   private var lastTriggeredAt: Date?
+
+  // VAD state
+  private var speechBuffer = Data()
+  private var isSpeechActive = false
+  private var silenceFrameCount = 0
+  private var peakEnergyDB: Float = -100.0
+
+  // VAD tuning — speech detection
+  private let speechEnergyThreshold: Float = -42.0   // dB to start capturing any speech
+  private let silenceFramesRequired = 20              // ~1.3s silence to finalize a segment
+
+  // Anti-false-trigger tuning
+  private let directSpeechMinDB: Float = -30.0        // peak dB required — filters out quiet speaker audio
+  private let minSpeechBytes = 9600                   // 300ms minimum (16kHz * 2 * 0.3s) — filters transient noise
+  private let maxSpeechBytes = 320_000                // 10s max capture
 
   func start(onWakeWord: @escaping (Detection) -> Void) {
     stop()
@@ -32,235 +41,138 @@ final class NicoleWakeWordController: NSObject, ObservableObject {
     shouldRemainListening = true
 
     Task {
-      await beginWakeListening()
+      await beginListening()
     }
   }
 
   func stop() {
     shouldRemainListening = false
-    teardown(clearState: true)
+    speechBuffer = Data()
+    isSpeechActive = false
+    silenceFrameCount = 0
+    peakEnergyDB = -100.0
+
+    SharedAudioEngine.shared.setConsumer(nil)
+    state = .idle
   }
 
-  private func beginWakeListening() async {
+  private func beginListening() async {
     guard shouldRemainListening else { return }
-    guard let speechRecognizer else {
-      state = .failed("Speech recognition isn’t available on this Mac.")
-      return
-    }
 
-    teardown(clearState: false)
     state = .requestingPermissions
 
-    let permissions = await NicoleSpeechPermissionManager.requestPermissions()
-    guard permissions.microphoneGranted else {
+    let micGranted = await NicoleSpeechPermissionManager.requestMicrophonePermission()
+    guard micGranted else {
       state = .failed("Microphone access is blocked. Enable it for Nicole or Xcode in Privacy & Security.")
       return
     }
 
-    guard permissions.speechGranted else {
-      state = .failed("Speech recognition access is blocked. Enable it for Nicole or Xcode in Privacy & Security.")
-      return
-    }
-
-    if permissions.promptedDuringRequest {
-      state = .requestingPermissions
-      try? await Task.sleep(for: .milliseconds(900))
-    }
-
-    do {
-      let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-      recognitionRequest.shouldReportPartialResults = true
-      if speechRecognizer.supportsOnDeviceRecognition {
-        recognitionRequest.requiresOnDeviceRecognition = true
-      }
-
-      self.recognitionRequest = recognitionRequest
-      self.state = .listening
-
-      let inputNode = audioEngine.inputNode
-      let format = inputNode.outputFormat(forBus: 0)
-      inputNode.removeTap(onBus: 0)
-      nonisolated(unsafe) let tapRequest = recognitionRequest
-      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
-        tapRequest.append(buffer)
-      }
-
-      audioEngine.prepare()
-      try audioEngine.start()
-
-      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
-        if let result {
-          let normalizedTranscript = Self.normalize(result.bestTranscription.formattedString)
-          let isFinal = result.isFinal
-
-          Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            if let wakeDetection = self.detectWakeWord(in: normalizedTranscript, isFinal: isFinal) {
-              self.lastTriggeredAt = Date()
-              self.shouldRemainListening = false
-              self.teardown(clearState: true)
-              self.wakeSink?(wakeDetection)
-              return
-            }
-
-            if isFinal, self.shouldRemainListening {
-              await self.restartAfterDelay()
-            }
-          }
-          return
-        }
-
-        if let error {
-          let message = error.localizedDescription
-          Task { @MainActor [weak self] in
-            guard let self else { return }
-            if self.shouldRemainListening {
-              self.state = .failed("Wake word: \(message)")
-              await self.restartAfterDelay()
-            } else {
-              self.teardown(clearState: true)
-            }
-          }
-        }
-      }
-    } catch {
-      teardown(clearState: false)
-      state = .failed("Nicole couldn’t start wake word listening: \(error.localizedDescription)")
-    }
-  }
-
-  private func restartAfterDelay() async {
-    guard shouldRemainListening else { return }
-    try? await Task.sleep(for: .milliseconds(450))
-    await restartRecognitionOnly()
-  }
-
-  /// Restart just the speech recognition task while keeping the audio engine
-  /// (and therefore the microphone) running. This prevents the orange mic
-  /// indicator from blinking on every recognition cycle.
-  private func restartRecognitionOnly() async {
-    guard shouldRemainListening else { return }
-    guard let speechRecognizer else { return }
-
-    // Tear down only the recognition side, keep audio engine alive
-    recognitionTask?.cancel()
-    recognitionTask = nil
-    recognitionRequest?.endAudio()
-    recognitionRequest = nil
-
-    // Ensure the audio engine is still running (it should be)
-    guard audioEngine.isRunning else {
-      // If the engine died for some reason, do a full restart
-      await beginWakeListening()
+    let whisperReady = await WhisperTranscriber.shared.isAvailable()
+    guard whisperReady else {
+      state = .failed("Whisper server isn't running. Start it with: ./start-whisper.sh")
       return
     }
 
     do {
-      let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-      recognitionRequest.shouldReportPartialResults = true
-      if speechRecognizer.supportsOnDeviceRecognition {
-        recognitionRequest.requiresOnDeviceRecognition = true
-      }
+      speechBuffer = Data()
+      isSpeechActive = false
+      silenceFrameCount = 0
+      peakEnergyDB = -100.0
 
-      self.recognitionRequest = recognitionRequest
-      self.state = .listening
-
-      // Re-install the tap so the new request receives audio buffers
-      let inputNode = audioEngine.inputNode
-      let format = inputNode.outputFormat(forBus: 0)
-      inputNode.removeTap(onBus: 0)
-      nonisolated(unsafe) let tapRequest = recognitionRequest
-      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
-        tapRequest.append(buffer)
-      }
-
-      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
-        if let result {
-          let normalizedTranscript = Self.normalize(result.bestTranscription.formattedString)
-          let isFinal = result.isFinal
-
-          Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            if let wakeDetection = self.detectWakeWord(in: normalizedTranscript, isFinal: isFinal) {
-              self.lastTriggeredAt = Date()
-              self.shouldRemainListening = false
-              self.teardown(clearState: true)
-              self.wakeSink?(wakeDetection)
-              return
-            }
-
-            if isFinal, self.shouldRemainListening {
-              await self.restartAfterDelay()
-            }
-          }
-          return
-        }
-
-        if let error {
-          let message = error.localizedDescription
-          Task { @MainActor [weak self] in
-            guard let self else { return }
-            if self.shouldRemainListening {
-              self.state = .failed("Wake word: \(message)")
-              await self.restartAfterDelay()
-            } else {
-              self.state = .idle
-            }
-          }
-        }
-      }
+      try SharedAudioEngine.shared.ensureRunning()
+      SharedAudioEngine.shared.setConsumer(self)
+      state = .listening
     } catch {
-      // If re-creating the recognition task fails, try a full restart
-      await beginWakeListening()
+      state = .failed("Nicole couldn't start wake word listening: \(error.localizedDescription)")
     }
   }
 
-  private func teardown(clearState: Bool) {
-    recognitionTask?.cancel()
-    recognitionTask = nil
+  func receiveAudio(data: Data, energyDB: Float) {
+    guard shouldRemainListening else { return }
 
-    recognitionRequest?.endAudio()
-    recognitionRequest = nil
+    let isSpeech = energyDB > speechEnergyThreshold
 
-    if audioEngine.isRunning {
-      audioEngine.stop()
-    }
+    if isSpeech {
+      if !isSpeechActive {
+        isSpeechActive = true
+        speechBuffer = Data()
+        peakEnergyDB = -100.0
+      }
+      silenceFrameCount = 0
+      speechBuffer.append(data)
+      peakEnergyDB = max(peakEnergyDB, energyDB)
 
-    audioEngine.inputNode.removeTap(onBus: 0)
+      if speechBuffer.count > maxSpeechBytes {
+        transcribeAndCheck()
+      }
+    } else if isSpeechActive {
+      speechBuffer.append(data)
+      silenceFrameCount += 1
 
-    if clearState {
-      state = .idle
+      if silenceFrameCount >= silenceFramesRequired {
+        transcribeAndCheck()
+      }
     }
   }
 
-  private func detectWakeWord(in transcript: String, isFinal: Bool) -> Detection? {
-    guard !transcript.isEmpty else { return nil }
+  private func transcribeAndCheck() {
+    let capturedAudio = speechBuffer
+    let capturedPeakDB = peakEnergyDB
 
-    if let lastTriggeredAt, Date().timeIntervalSince(lastTriggeredAt) < 1.8 {
+    speechBuffer = Data()
+    isSpeechActive = false
+    silenceFrameCount = 0
+    peakEnergyDB = -100.0
+
+    // Too short — likely a cough, click, or transient noise
+    guard capturedAudio.count >= minSpeechBytes else { return }
+
+    // Too quiet — likely speaker audio from a call, not direct speech into the mic
+    guard capturedPeakDB >= directSpeechMinDB else { return }
+
+    // Debounce
+    if let lastTriggeredAt, Date().timeIntervalSince(lastTriggeredAt) < 2.0 {
+      return
+    }
+
+    Task {
+      do {
+        let result = try await WhisperTranscriber.shared.transcribe(audioData: capturedAudio)
+        let normalized = Self.normalize(result.text)
+
+        guard !normalized.isEmpty else { return }
+
+        if let detection = detectWakeWord(in: normalized) {
+          lastTriggeredAt = Date()
+          shouldRemainListening = false
+          SharedAudioEngine.shared.setConsumer(nil)
+          state = .idle
+          wakeSink?(detection)
+        }
+      } catch {
+        print("Wake word transcription failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  private func detectWakeWord(in transcript: String) -> Detection? {
+    // Only accept "hey nicole" for always-on wake word detection.
+    // Just "nicole" alone is too common in ambient conversation.
+    let prefix = "hey nicole"
+
+    guard transcript == prefix || transcript.hasPrefix(prefix + " ") else {
       return nil
     }
 
-    let prefixes = ["hey nicole", "nicole"]
+    let remainder = transcript
+      .dropFirst(prefix.count)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
 
-    for prefix in prefixes {
-      guard transcript == prefix || transcript.hasPrefix(prefix + " ") else { continue }
-
-      let remainder = transcript
-        .dropFirst(prefix.count)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-
-      if remainder.isEmpty {
-        return transcript == prefix ? .wakeOnly : nil
-      }
-
-      if isFinal {
-        return .command(String(remainder))
-      }
+    if remainder.isEmpty {
+      return .wakeOnly
     }
 
-    return nil
+    return .command(String(remainder))
   }
 
   private static func normalize(_ text: String) -> String {

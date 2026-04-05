@@ -9,6 +9,12 @@ struct NicoleSpeechPermissionResult {
 
 enum NicoleSpeechPermissionManager {
   @MainActor
+  static func requestMicrophonePermission() async -> Bool {
+    let status = AVCaptureDevice.authorizationStatus(for: .audio)
+    return await requestMicrophoneAuthorization(currentStatus: status)
+  }
+
+  @MainActor
   static func requestPermissions() async -> NicoleSpeechPermissionResult {
     let speechStatus = SFSpeechRecognizer.authorizationStatus()
     let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)

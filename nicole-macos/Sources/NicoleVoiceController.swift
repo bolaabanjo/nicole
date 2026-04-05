@@ -1,9 +1,8 @@
 import AppKit
 import AVFoundation
-import Speech
 
 @MainActor
-final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
+final class NicoleVoiceController: NSObject, ObservableObject, AudioConsumer {
   enum Surface: Equatable {
     case expanded
     case compact
@@ -14,40 +13,43 @@ final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesiz
     case idle
     case requestingPermissions
     case listening(Surface)
+    case transcribing
     case failed(String)
   }
 
   @Published private(set) var inputState: InputState = .idle
+  @Published private(set) var currentAudioLevel: Float = -60.0
 
   var inlineStatusText: String? {
     switch inputState {
     case .idle:
       return nil
     case .requestingPermissions:
-      return "Requesting microphone and speech access…"
+      return "Requesting microphone access…"
     case .listening:
       return "Listening…"
+    case .transcribing:
+      return "Transcribing…"
     case let .failed(message):
       return message
     }
   }
 
-  private let audioEngine = AVAudioEngine()
-  private let synthesizer = AVSpeechSynthesizer()
-  private let speechRecognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer()
+  private let speaker = KokoroSpeaker.shared
 
-  private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-  private var recognitionTask: SFSpeechRecognitionTask?
+  private var audioBuffer = Data()
   private var transcriptSink: ((String) -> Void)?
   private var finalTranscriptSink: ((String) -> Void)?
   private var lastSpokenAssistantMessageID: String?
   private var pendingReplyCompletion: (() -> Void)?
   private var forceSpeakNextReply = false
+  private var seedText = ""
 
-  override init() {
-    super.init()
-    synthesizer.delegate = self
-  }
+  // VAD
+  private var silenceTimer: Task<Void, Never>?
+  private var hasDetectedSpeech = false
+  private let silenceThresholdSeconds: Double = 1.6
+  private let speechEnergyThreshold: Float = -40.0
 
   func isListening(on surface: Surface) -> Bool {
     guard case let .listening(activeSurface) = inputState else {
@@ -89,26 +91,115 @@ final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesiz
   }
 
   func prepareForAmbientReply(onCompletion: @escaping () -> Void) {
-    synthesizer.stopSpeaking(at: .immediate)
+    speaker.stopSpeaking()
     forceSpeakNextReply = true
     pendingReplyCompletion = onCompletion
   }
 
   func completePreparedReplyWithoutSpeech() {
     forceSpeakNextReply = false
+    isStreamingTTS = false
     let completion = pendingReplyCompletion
     pendingReplyCompletion = nil
     completion?()
   }
 
   func stopSpeaking() {
-    synthesizer.stopSpeaking(at: .immediate)
+    speaker.stopSpeaking()
   }
+
+  // MARK: - Streaming TTS
+
+  private(set) var isStreamingTTS = false
+  private var spokenContentLength = 0
+
+  func beginStreamingTTS(onAllComplete: @escaping () -> Void) {
+    speaker.stopSpeaking()
+    forceSpeakNextReply = false
+    pendingReplyCompletion = nil
+    isStreamingTTS = true
+    spokenContentLength = 0
+
+    speaker.beginStreamingSpeech(onAllComplete: onAllComplete)
+  }
+
+  func handleStreamingContent(_ visibleContent: String) {
+    guard isStreamingTTS else { return }
+
+    let newContent = String(visibleContent.dropFirst(spokenContentLength))
+    guard !newContent.isEmpty else { return }
+
+    // Extract complete sentences from the new content
+    let (sentences, _) = extractSentences(from: newContent)
+
+    for sentence in sentences {
+      spokenContentLength += sentence.count
+      speaker.enqueueSentence(sentence)
+    }
+  }
+
+  func finishStreamingTTS(remainingContent: String) {
+    guard isStreamingTTS else { return }
+    isStreamingTTS = false
+
+    // Send any remaining text that didn't end with sentence punctuation
+    let unsent = String(remainingContent.dropFirst(spokenContentLength))
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    speaker.finishStreamingSpeech(remainingText: unsent.isEmpty ? nil : unsent)
+  }
+
+  func cancelStreamingTTS() {
+    isStreamingTTS = false
+    spokenContentLength = 0
+    speaker.stopSpeaking()
+  }
+
+  private func extractSentences(from text: String) -> (sentences: [String], remainder: String) {
+    var sentences: [String] = []
+    var current = ""
+    let chars = Array(text)
+    var i = 0
+
+    while i < chars.count {
+      current.append(chars[i])
+
+      let isSentenceEnd = chars[i] == "." || chars[i] == "!" || chars[i] == "?"
+      let nextIsSpaceOrEnd = (i + 1 >= chars.count) || chars[i + 1] == " " || chars[i + 1] == "\n"
+
+      // Split on sentence-ending punctuation followed by space/end, with minimum length
+      // to avoid splitting on "Dr." or "3.14"
+      if isSentenceEnd && nextIsSpaceOrEnd && current.count >= 20 {
+        let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+          sentences.append(trimmed)
+        }
+        current = ""
+      }
+
+      i += 1
+    }
+
+    // Also split on newlines as sentence boundaries
+    if !current.isEmpty && current.contains("\n") {
+      let lines = current.components(separatedBy: "\n")
+      for (index, line) in lines.enumerated() {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && index < lines.count - 1 {
+          sentences.append(trimmed)
+          current = lines[(index + 1)...].joined(separator: "\n")
+          break
+        }
+      }
+    }
+
+    return (sentences, current)
+  }
+
+  // MARK: - Non-streaming speech
 
   func handleCompletedAssistantMessage(_ message: NicoleMessage) {
     guard
-      let appDelegate = NSApp.delegate as? AppDelegate,
-      let settings = appDelegate.settings,
       message.role == .assistant,
       !message.content.isEmpty,
       lastSpokenAssistantMessageID != message.id
@@ -116,7 +207,11 @@ final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesiz
       return
     }
 
-    let shouldSpeak = settings.voiceRepliesEnabled || forceSpeakNextReply
+    // Skip if streaming TTS already handled this message
+    guard !isStreamingTTS else { return }
+
+    let voiceRepliesEnabled = (NSApp.delegate as? AppDelegate)?.settings?.voiceRepliesEnabled ?? false
+    let shouldSpeak = voiceRepliesEnabled || forceSpeakNextReply
     let completion = pendingReplyCompletion
     pendingReplyCompletion = nil
     forceSpeakNextReply = false
@@ -127,7 +222,7 @@ final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesiz
     }
 
     lastSpokenAssistantMessageID = message.id
-    speak(text: message.content, onCompletion: completion)
+    speaker.speak(text: message.content, onCompletion: completion)
   }
 
   private func startListening(
@@ -136,118 +231,112 @@ final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesiz
     onTranscript: @escaping (String) -> Void,
     onFinalTranscript: ((String) -> Void)? = nil
   ) async {
-    guard let speechRecognizer else {
-      inputState = .failed("Speech recognition isn’t available on this Mac.")
-      return
-    }
-
-    synthesizer.stopSpeaking(at: .immediate)
+    speaker.stopSpeaking()
     stopListening(clearStatus: false)
-    inputState = .requestingPermissions
 
-    let permissions = await NicoleSpeechPermissionManager.requestPermissions()
-    guard permissions.microphoneGranted else {
+    inputState = .requestingPermissions
+    self.seedText = seedText
+
+    let permissions = await NicoleSpeechPermissionManager.requestMicrophonePermission()
+    guard permissions else {
       inputState = .failed("Microphone access is blocked. Enable it for Nicole or Xcode in Privacy & Security.")
       return
     }
 
-    guard permissions.speechGranted else {
-      inputState = .failed("Speech recognition access is blocked. Enable it for Nicole or Xcode in Privacy & Security.")
+    let whisperReady = await WhisperTranscriber.shared.isAvailable()
+    guard whisperReady else {
+      inputState = .failed("Whisper server isn't running. Start it with: ./start-whisper.sh")
       return
     }
 
-    if permissions.promptedDuringRequest {
-      inputState = .requestingPermissions
-      try? await Task.sleep(for: .milliseconds(900))
+    do {
+      audioBuffer = Data()
+      hasDetectedSpeech = false
+      transcriptSink = onTranscript
+      finalTranscriptSink = onFinalTranscript
+      inputState = .listening(surface)
+
+      try SharedAudioEngine.shared.ensureRunning()
+      SharedAudioEngine.shared.setConsumer(self)
+    } catch {
+      stopListening(clearStatus: false)
+      inputState = .failed("Nicole couldn't start listening: \(error.localizedDescription)")
+    }
+  }
+
+  func receiveAudio(data: Data, energyDB: Float) {
+    audioBuffer.append(data)
+    currentAudioLevel = energyDB
+
+    let isSpeech = energyDB > speechEnergyThreshold
+
+    if isSpeech {
+      hasDetectedSpeech = true
+      silenceTimer?.cancel()
+      silenceTimer = nil
+    } else if hasDetectedSpeech, silenceTimer == nil {
+      silenceTimer = Task { [weak self] in
+        try? await Task.sleep(for: .seconds(self?.silenceThresholdSeconds ?? 1.6))
+        guard !Task.isCancelled else { return }
+        self?.finishAndTranscribe()
+      }
+    }
+  }
+
+  private func finishAndTranscribe() {
+    guard case .listening = inputState else { return }
+
+    let capturedAudio = audioBuffer
+    let capturedSeed = seedText
+
+    SharedAudioEngine.shared.setConsumer(nil)
+    silenceTimer?.cancel()
+    silenceTimer = nil
+
+    guard !capturedAudio.isEmpty, hasDetectedSpeech else {
+      stopListening()
+      return
     }
 
-    do {
-      let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-      recognitionRequest.shouldReportPartialResults = true
-      if speechRecognizer.supportsOnDeviceRecognition {
-        recognitionRequest.requiresOnDeviceRecognition = true
-      }
+    inputState = .transcribing
 
-      self.recognitionRequest = recognitionRequest
-      self.transcriptSink = onTranscript
-      self.finalTranscriptSink = onFinalTranscript
-      self.inputState = .listening(surface)
+    Task {
+      do {
+        let result = try await WhisperTranscriber.shared.transcribe(audioData: capturedAudio)
 
-      let inputNode = audioEngine.inputNode
-      let format = inputNode.outputFormat(forBus: 0)
-      inputNode.removeTap(onBus: 0)
-      nonisolated(unsafe) let tapRequest = recognitionRequest
-      inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
-        tapRequest.append(buffer)
-      }
+        let transcript = mergeTranscript(seedText: capturedSeed, transcript: result.text)
 
-      audioEngine.prepare()
-      try audioEngine.start()
-
-      recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
-        if let result {
-          let rawTranscript = result.bestTranscription.formattedString
-          let isFinal = result.isFinal
-
-          Task { @MainActor [weak self] in
-            guard let self else { return }
-            let transcript = self.mergeTranscript(
-              seedText: seedText,
-              transcript: rawTranscript
-            )
-            self.transcriptSink?(transcript)
-
-            if isFinal {
-              self.finalTranscriptSink?(transcript)
-              self.stopListening()
-            }
-          }
-          // Don't process error if we got a valid result
+        if transcript.isEmpty {
+          inputState = .idle
           return
         }
 
-        if let error {
-          let message = error.localizedDescription
-          Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.stopListening(clearStatus: false)
-            self.inputState = .failed("Voice input stopped: \(message)")
-          }
-        }
+        transcriptSink?(transcript)
+        finalTranscriptSink?(transcript)
+        inputState = .idle
+      } catch {
+        inputState = .failed("Transcription failed: \(error.localizedDescription)")
       }
-    } catch {
-      stopListening(clearStatus: false)
-      inputState = .failed("Nicole couldn’t start listening: \(error.localizedDescription)")
+
+      transcriptSink = nil
+      finalTranscriptSink = nil
+      audioBuffer = Data()
     }
   }
 
   private func stopListening(clearStatus: Bool = true) {
-    recognitionTask?.cancel()
-    recognitionTask = nil
+    silenceTimer?.cancel()
+    silenceTimer = nil
 
-    recognitionRequest?.endAudio()
-    recognitionRequest = nil
-
-    if audioEngine.isRunning {
-      audioEngine.stop()
-    }
-
-    audioEngine.inputNode.removeTap(onBus: 0)
+    SharedAudioEngine.shared.setConsumer(nil)
     transcriptSink = nil
     finalTranscriptSink = nil
+    audioBuffer = Data()
+    hasDetectedSpeech = false
 
     if clearStatus {
       inputState = .idle
     }
-  }
-
-  private func speak(text: String, onCompletion: (() -> Void)? = nil) {
-    pendingReplyCompletion = onCompletion
-    let utterance = AVSpeechUtterance(string: text)
-    utterance.rate = 0.48
-    utterance.pitchMultiplier = 1.02
-    utterance.voice = AVSpeechSynthesisVoice(language: Locale.preferredLanguages.first ?? "en-US")
-    synthesizer.speak(utterance)
   }
 
   private func mergeTranscript(seedText: String, transcript: String) -> String {
@@ -263,21 +352,5 @@ final class NicoleVoiceController: NSObject, ObservableObject, AVSpeechSynthesiz
     }
 
     return "\(trimmedSeed) \(trimmedTranscript)"
-  }
-
-  nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-    Task { @MainActor in
-      let completion = self.pendingReplyCompletion
-      self.pendingReplyCompletion = nil
-      completion?()
-    }
-  }
-
-  nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-    Task { @MainActor in
-      let completion = self.pendingReplyCompletion
-      self.pendingReplyCompletion = nil
-      completion?()
-    }
   }
 }
