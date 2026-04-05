@@ -27,7 +27,7 @@ final class NicoleWakeWordController: NSObject, ObservableObject, AudioConsumer 
   private var peakEnergyDB: Float = -100.0
 
   // VAD tuning — speech detection
-  private let speechEnergyThreshold: Float = -42.0   // dB to start capturing any speech
+  private let speechEnergyThreshold: Float = -38.0   // dB to start capturing any speech (raised from -42 to filter clicks/taps)
   private let silenceFramesRequired = 20              // ~1.3s silence to finalize a segment
 
   // Anti-false-trigger tuning

@@ -163,6 +163,13 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
     guard !prefetchedAudio.isEmpty else { return }
     let wavData = prefetchedAudio.removeFirst()
 
+    // Skip near-empty WAVs (just headers, no real audio) — prevents ghost playback
+    // WAV header is 44 bytes; anything under ~500 bytes is < 5ms of audio
+    guard wavData.count > 500 else {
+      processStreamingQueue()
+      return
+    }
+
     do {
       let player = try AVAudioPlayer(data: wavData)
       player.delegate = self
@@ -212,7 +219,7 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     let body: [String: Any] = [
       "text": text,
-      "voice": "af_nicole",
+      "voice": "af_sky",
       "speed": 1.2,
     ]
 

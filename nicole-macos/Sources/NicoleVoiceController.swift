@@ -48,8 +48,56 @@ final class NicoleVoiceController: NSObject, ObservableObject, AudioConsumer {
   // VAD
   private var silenceTimer: Task<Void, Never>?
   private var hasDetectedSpeech = false
+  private var speechFrameCount = 0
+  private var peakEnergyDB: Float = -100.0
   private let silenceThresholdSeconds: Double = 1.6
-  private let speechEnergyThreshold: Float = -40.0
+  private let speechEnergyThreshold: Float = -35.0       // dB to count as speech (raised from -40 to filter clicks/taps)
+  private let minSpeechFrames = 8                         // ~500ms of speech frames required before accepting
+  private let directSpeechMinDB: Float = -28.0            // peak dB required — filters out quiet ambient noise
+
+  // Barge-in (interrupt detection while Nicole is speaking)
+  private var isMonitoringForInterrupt = false
+  private var interruptSpeechFrames = 0
+  private var interruptAudioBuffer = Data()
+  private var interruptSink: ((Data) -> Void)?
+  private let interruptEnergyThreshold: Float = -18.0    // much higher — only direct speech into the mic, not speaker bleed
+  private let interruptMinFrames = 10                     // ~625ms sustained — must be clearly intentional
+
+  // Overlapping transcription — transcribe while user is still speaking
+  private var progressiveTranscribeTimer: Task<Void, Never>?
+  private var latestProgressiveTranscript: String?
+  private var progressiveAudioSnapshot = 0               // byte count at last progressive transcription
+  private let progressiveIntervalSeconds: Double = 2.0   // how often to send audio to Whisper while speaking
+  private let progressiveTailThreshold = 16000            // 500ms of new audio — if less, skip final re-transcription
+
+  // MARK: - Barge-in (interrupt while speaking)
+
+  /// Start monitoring the mic for speech while Nicole is talking.
+  /// If the user speaks loudly enough for long enough, `onInterrupt` fires
+  /// with the captured audio data so far (to include in transcription).
+  func startInterruptMonitoring(onInterrupt: @escaping (Data) -> Void) {
+    isMonitoringForInterrupt = true
+    interruptSpeechFrames = 0
+    interruptAudioBuffer = Data()
+    interruptSink = onInterrupt
+
+    do {
+      try SharedAudioEngine.shared.ensureRunning()
+      SharedAudioEngine.shared.setConsumer(self)
+    } catch {
+      isMonitoringForInterrupt = false
+      interruptSink = nil
+    }
+  }
+
+  func stopInterruptMonitoring() {
+    guard isMonitoringForInterrupt else { return }
+    isMonitoringForInterrupt = false
+    interruptSpeechFrames = 0
+    interruptAudioBuffer = Data()
+    interruptSink = nil
+    SharedAudioEngine.shared.setConsumer(nil)
+  }
 
   func isListening(on surface: Surface) -> Bool {
     guard case let .listening(activeSurface) = inputState else {
@@ -143,10 +191,17 @@ final class NicoleVoiceController: NSObject, ObservableObject, AudioConsumer {
     isStreamingTTS = false
 
     // Send any remaining text that didn't end with sentence punctuation
-    let unsent = String(remainingContent.dropFirst(spokenContentLength))
+    var unsent = String(remainingContent.dropFirst(spokenContentLength))
       .trimmingCharacters(in: .whitespacesAndNewlines)
 
-    speaker.finishStreamingSpeech(remainingText: unsent.isEmpty ? nil : unsent)
+    // Strip markdown artifacts that would produce silent/glitchy TTS
+    unsent = unsent
+      .replacingOccurrences(of: #"[*_~`#>\-\[\](){}|]"#, with: "", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // Only send if there's actual speakable content (at least a few real characters)
+    let hasSpeakableContent = unsent.count >= 3 && unsent.rangeOfCharacter(from: .letters) != nil
+    speaker.finishStreamingSpeech(remainingText: hasSpeakableContent ? unsent : nil)
   }
 
   func cancelStreamingTTS() {
@@ -265,13 +320,49 @@ final class NicoleVoiceController: NSObject, ObservableObject, AudioConsumer {
   }
 
   func receiveAudio(data: Data, energyDB: Float) {
+    // Barge-in mode: monitoring for interrupt while Nicole speaks
+    if isMonitoringForInterrupt {
+      interruptAudioBuffer.append(data)
+
+      if energyDB > interruptEnergyThreshold {
+        interruptSpeechFrames += 1
+        print("[Barge-in] frame \(interruptSpeechFrames)/\(interruptMinFrames) energy=\(String(format: "%.1f", energyDB))dB")
+
+        if interruptSpeechFrames >= interruptMinFrames {
+          // User is definitely speaking over Nicole — fire interrupt
+          print("[Barge-in] INTERRUPT TRIGGERED — \(interruptSpeechFrames) frames above \(interruptEnergyThreshold)dB")
+          let capturedAudio = interruptAudioBuffer
+          let sink = interruptSink
+          stopInterruptMonitoring()
+          sink?(capturedAudio)
+        }
+      } else {
+        if interruptSpeechFrames > 0 {
+          print("[Barge-in] reset at energy=\(String(format: "%.1f", energyDB))dB (threshold=\(interruptEnergyThreshold)dB)")
+        }
+        // Reset if silence — must be sustained speech, not a one-off noise
+        interruptSpeechFrames = 0
+      }
+      return
+    }
+
+    // Normal voice capture mode
     audioBuffer.append(data)
     currentAudioLevel = energyDB
 
     let isSpeech = energyDB > speechEnergyThreshold
 
     if isSpeech {
-      hasDetectedSpeech = true
+      speechFrameCount += 1
+      peakEnergyDB = max(peakEnergyDB, energyDB)
+
+      // Only mark speech as detected after enough consecutive-ish frames
+      // This filters out short transient sounds (clicks, taps, door squeaks)
+      if speechFrameCount >= minSpeechFrames {
+        hasDetectedSpeech = true
+        startProgressiveTranscriptionIfNeeded()
+      }
+
       silenceTimer?.cancel()
       silenceTimer = nil
     } else if hasDetectedSpeech, silenceTimer == nil {
@@ -283,17 +374,59 @@ final class NicoleVoiceController: NSObject, ObservableObject, AudioConsumer {
     }
   }
 
+  private func startProgressiveTranscriptionIfNeeded() {
+    guard progressiveTranscribeTimer == nil else { return }
+
+    progressiveTranscribeTimer = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(self?.progressiveIntervalSeconds ?? 2.0))
+        guard !Task.isCancelled else { break }
+        await self?.runProgressiveTranscription()
+      }
+    }
+  }
+
+  private func stopProgressiveTranscription() {
+    progressiveTranscribeTimer?.cancel()
+    progressiveTranscribeTimer = nil
+  }
+
+  private func runProgressiveTranscription() async {
+    // Snapshot the current audio buffer and transcribe it in the background
+    let snapshot = audioBuffer
+    guard snapshot.count > progressiveAudioSnapshot + 16000 else { return } // at least 500ms of new audio
+
+    progressiveAudioSnapshot = snapshot.count
+
+    do {
+      let result = try await WhisperTranscriber.shared.transcribe(audioData: snapshot)
+      let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !text.isEmpty {
+        latestProgressiveTranscript = text
+      }
+    } catch {
+      // Progressive transcription is best-effort — don't fail the whole flow
+    }
+  }
+
   private func finishAndTranscribe() {
     guard case .listening = inputState else { return }
 
     let capturedAudio = audioBuffer
     let capturedSeed = seedText
+    let capturedPeakDB = peakEnergyDB
+    let progressiveResult = latestProgressiveTranscript
+    let newAudioSinceProgressive = capturedAudio.count - progressiveAudioSnapshot
 
     SharedAudioEngine.shared.setConsumer(nil)
     silenceTimer?.cancel()
     silenceTimer = nil
+    stopProgressiveTranscription()
 
-    guard !capturedAudio.isEmpty, hasDetectedSpeech else {
+    // Not enough speech detected, or peak too quiet (ambient noise, not direct speech)
+    guard !capturedAudio.isEmpty, hasDetectedSpeech, capturedPeakDB >= directSpeechMinDB else {
+      latestProgressiveTranscript = nil
+      progressiveAudioSnapshot = 0
       stopListening()
       return
     }
@@ -302,19 +435,35 @@ final class NicoleVoiceController: NSObject, ObservableObject, AudioConsumer {
 
     Task {
       do {
-        let result = try await WhisperTranscriber.shared.transcribe(audioData: capturedAudio)
+        let transcript: String
 
-        let transcript = mergeTranscript(seedText: capturedSeed, transcript: result.text)
+        // If we have a progressive result and very little new audio since,
+        // use it immediately — saves a full Whisper round trip
+        if let progressiveResult, !progressiveResult.isEmpty,
+           newAudioSinceProgressive < progressiveTailThreshold {
+          transcript = progressiveResult
+        } else {
+          // Full re-transcription of complete audio
+          let result = try await WhisperTranscriber.shared.transcribe(audioData: capturedAudio)
+          transcript = result.text
+        }
 
-        if transcript.isEmpty {
+        let merged = mergeTranscript(seedText: capturedSeed, transcript: transcript)
+
+        latestProgressiveTranscript = nil
+        progressiveAudioSnapshot = 0
+
+        if merged.isEmpty {
           inputState = .idle
           return
         }
 
-        transcriptSink?(transcript)
-        finalTranscriptSink?(transcript)
+        transcriptSink?(merged)
+        finalTranscriptSink?(merged)
         inputState = .idle
       } catch {
+        latestProgressiveTranscript = nil
+        progressiveAudioSnapshot = 0
         inputState = .failed("Transcription failed: \(error.localizedDescription)")
       }
 
@@ -327,12 +476,17 @@ final class NicoleVoiceController: NSObject, ObservableObject, AudioConsumer {
   private func stopListening(clearStatus: Bool = true) {
     silenceTimer?.cancel()
     silenceTimer = nil
+    stopProgressiveTranscription()
+    latestProgressiveTranscript = nil
+    progressiveAudioSnapshot = 0
 
     SharedAudioEngine.shared.setConsumer(nil)
     transcriptSink = nil
     finalTranscriptSink = nil
     audioBuffer = Data()
     hasDetectedSpeech = false
+    speechFrameCount = 0
+    peakEnergyDB = -100.0
 
     if clearStatus {
       inputState = .idle
