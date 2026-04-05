@@ -14,6 +14,30 @@ struct ContentView: View {
   private let maxContentWidth: CGFloat = 760
 
   var body: some View {
+    Group {
+      if settings.voiceModeActive {
+        VoiceModeView(
+          settings: settings,
+          viewModel: viewModel,
+          voiceController: voiceController
+        ) {
+          withAnimation(.easeInOut(duration: 0.3)) {
+            settings.voiceModeActive = false
+          }
+        }
+      } else {
+        chatView
+      }
+    }
+    .sheet(isPresented: $isShowingSettings) {
+      SettingsView(settings: settings)
+    }
+    .task {
+      await viewModel.loadHistory(baseURLString: settings.baseURLString)
+    }
+  }
+
+  private var chatView: some View {
     VStack(spacing: 0) {
       header
 
@@ -52,12 +76,6 @@ struct ContentView: View {
     )
     .background(Color.black)
     .preferredColorScheme(.dark)
-    .sheet(isPresented: $isShowingSettings) {
-      SettingsView(settings: settings)
-    }
-    .task {
-      await viewModel.loadHistory(baseURLString: settings.baseURLString)
-    }
   }
 
   private var header: some View {
@@ -95,6 +113,18 @@ struct ContentView: View {
           .buttonStyle(.plain)
           .foregroundStyle(Color.white.opacity(0.58))
           .help("Refresh History")
+
+          Button {
+            withAnimation(.easeInOut(duration: 0.3)) {
+              settings.voiceModeActive = true
+            }
+          } label: {
+            Image(systemName: "waveform.circle")
+              .font(.system(size: 14, weight: .medium))
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(Color.white.opacity(0.58))
+          .help("Voice Mode")
 
           Button {
             isShowingSettings = true
