@@ -19,7 +19,7 @@ import {
 import { searchZohoMail, sendZohoMail } from "@/lib/integrations/zoho-mail";
 import { deepResearch } from "@/lib/search/research";
 import { searchRelevantSourceChunks } from "@/lib/search/semantic";
-import { searchWeb, fetchPageContent } from "@/lib/search/web";
+import { fetchPageContent, formatSearchResults, searchWeb } from "@/lib/search/web";
 import {
   READY_TOOL_NAMES,
   TOOL_CATALOG,
@@ -120,6 +120,33 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
       minifyToolDefinition
     ),
   }),
+  workspace_read: async (input) => {
+    const { readWorkspaceFile } = await import("@/lib/ai/workspace");
+    const path = readRequiredString(input, "path");
+    const content = await readWorkspaceFile(path);
+    if (content === null) {
+      return { ok: false, error: `File not found: ${path}` };
+    }
+    return { ok: true, path, content };
+  },
+  workspace_write: async (input) => {
+    const { writeWorkspaceFile } = await import("@/lib/ai/workspace");
+    const path = readRequiredString(input, "path");
+    const content = readRequiredString(input, "content");
+    return writeWorkspaceFile(path, content);
+  },
+  workspace_list: async (input) => {
+    const { listWorkspaceFiles } = await import("@/lib/ai/workspace");
+    const directory = readOptionalString(input, "directory") || "";
+    const files = await listWorkspaceFiles(directory);
+    return { directory: directory || "/", files };
+  },
+  workspace_append_daily: async (input) => {
+    const { appendToDailyMemory } = await import("@/lib/ai/workspace");
+    const entry = readRequiredString(input, "entry");
+    await appendToDailyMemory(entry);
+    return { ok: true, entry };
+  },
   memory_search: async (input) => {
     const query = readRequiredString(input, "query");
     const limit = readOptionalNumber(input, "limit", 6, 1, 12);
@@ -201,10 +228,32 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const query = readRequiredString(input, "query");
     const limit = readOptionalNumber(input, "limit", 5, 1, 10);
     const response = await searchWeb(query, limit);
-    if (response.error) {
-      throw new Error(response.error);
+
+    // Auto-fetch full content from the top result for richer answers
+    let topResultContent: string | null = null;
+    if (response.results.length > 0 && response.status === "ok") {
+      try {
+        const page = await fetchPageContent(response.results[0].url);
+        if (page.text && page.wordCount > 30) {
+          // Trim to reasonable size — we don't need 10k words
+          const words = page.text.split(/\s+/);
+          topResultContent = words.slice(0, 800).join(" ");
+        }
+      } catch {
+        // Fetch failed, snippets are still fine
+      }
     }
-    return { results: response.results, provider: response.provider };
+
+    return {
+      query,
+      results: response.results,
+      topResultContent,
+      provider: response.provider,
+      status: response.status,
+      liveSearchAvailable: response.liveSearchAvailable,
+      warning: response.warning ?? null,
+      error: response.error ?? null,
+    };
   },
   web_open: async (input) => {
     const url = readRequiredString(input, "url");
@@ -516,17 +565,26 @@ If no tool is needed, respond with exactly: NO_TOOL
 When to use web_search:
 - Questions about current events, news, recent happenings, or anything after your knowledge cutoff
 - Questions about specific people, companies, or projects where up-to-date facts matter
+- "Who is [name]?" — ALWAYS search unless the person is extremely famous (world leaders, major celebrities). If there is any chance you might hallucinate or confuse the person, search.
 - Anything where being wrong would be worse than taking a second to check
 - When the user explicitly asks you to look something up
 - When you are not confident in the answer and a search would resolve it
+- When in doubt between searching and guessing, ALWAYS search. A search that confirms what you knew is free. A guess that's wrong is costly.
 
 When to use web_open:
 - After a web_search, when the search snippets are not enough and you need the full page content
 
+When to use workspace tools:
+- workspace_read: When you need to check your own files — your user profile, context, daily notes, or skill definitions
+- workspace_write: When you learn something durable about Roy (update user.md), or need to update your current context (context.md)
+- workspace_append_daily: When something notable happens worth logging — a decision, a completed task, a new preference learned
+- workspace_list: When you need to see what's in your workspace directories
+
 When NOT to use tools:
 - Casual conversation, greetings, emotional support, opinions, advice
-- Questions you can answer confidently from general knowledge (math, definitions, well-known facts)
+- Math, definitions, or universally known facts (e.g. "what is photosynthesis", "what's 2+2")
 - Follow-up messages in an ongoing conversation where context is already available
+- Do NOT skip web_search just because the name sounds familiar. If you cannot cite a specific source for your answer, search.
 
 Rules:
 - Call at most one tool per response
@@ -549,6 +607,102 @@ export async function runDirectToolRouting(
   }
 
   return [await executeToolCall(directToolCall)];
+}
+
+// ---------------------------------------------------------------------------
+// Intent-based tool execution — deterministic, no LLM planner
+// ---------------------------------------------------------------------------
+
+import { classifyIntent, IntentClassification } from "@/lib/ai/intent";
+
+export { classifyIntent };
+export type { IntentClassification };
+
+/**
+ * Deterministic tool runner. Takes a classified intent and executes the
+ * appropriate tools without asking the LLM "should I use a tool?".
+ *
+ * Returns tool results that get injected into the system prompt.
+ */
+export async function runIntentBasedTooling(
+  intent: IntentClassification,
+  message: string,
+  recentMessages: ChatMessage[] = []
+): Promise<ToolExecutionResult[]> {
+  const results: ToolExecutionResult[] = [];
+
+  switch (intent.intent) {
+    case "casual":
+      // No tools needed
+      break;
+
+    case "factual_question":
+      // Always web search — never let the model guess
+      if (intent.searchQuery) {
+        results.push(
+          await executeToolCall({
+            name: "web_search",
+            arguments: { query: intent.searchQuery, limit: 5 },
+          })
+        );
+      }
+      break;
+
+    case "source_question":
+      // Search ingested sources
+      if (intent.sourceQuery) {
+        results.push(
+          await executeToolCall({
+            name: "source_search",
+            arguments: { query: intent.sourceQuery, limit: 6 },
+          })
+        );
+      }
+      break;
+
+    case "personal_question":
+      // Try existing direct routing for calendar/reminder/email commands
+      {
+        const directCall = detectDirectToolCall(message, recentMessages);
+        if (directCall) {
+          results.push(await executeToolCall(directCall));
+        }
+      }
+      break;
+
+    case "action_request":
+      // Direct tool routing handles reminders, calendar creates, email, git, terminal
+      {
+        const directCall = detectDirectToolCall(message, recentMessages);
+        if (directCall) {
+          results.push(await executeToolCall(directCall));
+        }
+      }
+      break;
+
+    case "workspace_question":
+      // Workspace tool routing
+      {
+        const directCall = detectDirectToolCall(message, recentMessages);
+        if (directCall) {
+          results.push(await executeToolCall(directCall));
+        }
+      }
+      break;
+
+    case "ambiguous":
+      // No explicit tools — context (memory/sources) auto-attached by the route
+      // But still try direct routing in case it matches a command pattern
+      {
+        const directCall = detectDirectToolCall(message, recentMessages);
+        if (directCall) {
+          results.push(await executeToolCall(directCall));
+        }
+      }
+      break;
+  }
+
+  return results;
 }
 
 /**
@@ -585,7 +739,7 @@ export function shouldAttemptToolUse(message: string): boolean {
 
   // Explicit tool keywords — always use tools
   if (
-    /\b(search|look up|lookup|research|find out|web|source|sources|library|pdf|document|notes?|remember|save this|store this|list tools|what can you do|create note|update note)\b/.test(
+    /\b(search|look up|lookup|research|find out|web|source|sources|library|pdf|document|notes?|remember|save this|store this|list tools|what can you do|create note|update note|write this down|write that down|note that|update your|update my profile|what do you know about me|your workspace|your files|your memory|your notes|daily note|jot this down)\b/.test(
       normalized
     )
   ) {
@@ -601,18 +755,16 @@ export function shouldAttemptToolUse(message: string): boolean {
     return true;
   }
 
-  // Questions starting with who/what/when/where/how/why/is/are/did/does/has/have + enough length
-  // Short ones like "what?" or "who cares" get filtered, but real questions go to the planner
+  // Factual questions about people, places, things — likely need search
   if (
-    normalized.length > 15 &&
-    /^(who|what|when|where|how|why|is|are|did|does|has|have|can|could|will|should)\b/.test(
+    /^(who is|who are|who was|what is|what are|what was|where is|where are|when is|when was|when did|how old is|how much is|how many|tell me about|what happened to|what do you know about)\b/.test(
       normalized
     )
   ) {
     return true;
   }
 
-  // If the message is a question (ends with ?) and is substantive, let the planner decide
+  // Questions ending with ? that aren't casual — probably need tools
   if (normalized.endsWith("?") && normalized.length > 20) {
     return true;
   }
@@ -700,6 +852,10 @@ export function formatToolResultsForPrompt(
 
   return toolResults
     .map((result) => {
+      if (result.name === "web_search") {
+        return formatWebSearchToolResult(result);
+      }
+
       if (!result.ok) {
         return `Tool ${result.name} failed.\nError: ${result.error}`;
       }
@@ -711,6 +867,15 @@ export function formatToolResultsForPrompt(
       )}`;
     })
     .join("\n\n");
+}
+
+export function buildToolPromptBlock(toolResults: ToolExecutionResult[]): string {
+  const toolContext = formatToolResultsForPrompt(toolResults);
+  if (!toolContext) {
+    return "";
+  }
+
+  return `\n\n## Tool results\nNicole called tools before answering. CRITICAL RULES:\n- Treat tool results as the source of truth for current or external information.\n- For non-search tools, base your answer only on the tool results below.\n- If web_search says live Google search was unavailable, say that clearly first. Then you may give a cautious fallback answer from your prior knowledge, but you must label it as not verified by live Google search.\n- If web_search says the live results were thin or inconclusive, say that clearly first. Then you may give a cautious fallback answer, clearly labeled as not fully verified by live Google search.\n- If web_search returned usable live results, answer from those live results and do not present prior knowledge as if it came from live search.\n- Never claim to have searched the web if the tool says live search failed or was weak.\n- Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
 }
 
 export function parseToolCall(content: string): ToolCall | null {
@@ -812,7 +977,8 @@ function detectDirectToolCall(
     parseEmailSendToolCall(trimmed) ||
     parseGitStatusToolCall(trimmed) ||
     parseTerminalToolCall(trimmed) ||
-    parseToolRegistryCall(trimmed)
+    parseToolRegistryCall(trimmed) ||
+    parseWorkspaceToolCall(trimmed)
   );
 }
 
@@ -820,16 +986,9 @@ function parseWebSearchToolCall(
   message: string,
   recentMessages: ChatMessage[]
 ): ToolCall | null {
-  const explicitMatch =
-    message.match(
-      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:search|search the web|search web|web search|google|look up|lookup)\s+(?:the web\s+)?(?:for\s+)?(.+)$/i
-    ) ||
-    message.match(
-      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:tell me|find out)\s+who\s+(.+?)\s+is(?:\s+and\s+tell\s+me\s+what\s+you\s+find)?[?.!]*$/i
-    ) ||
-    message.match(
-      /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?who\s+is\s+(.+)\??$/i
-    );
+  const explicitMatch = message.match(
+    /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:search|search the web|search web|web search|google|look up|lookup)\s+(?:the web\s+)?(?:for\s+)?(.+)$/i
+  );
 
   if (explicitMatch) {
     const query = cleanSearchQuery(explicitMatch[1]);
@@ -841,7 +1000,28 @@ function parseWebSearchToolCall(
     }
   }
 
-  if (/^(?:google|look (?:him|her|them|it) up|search the web)\s+(?:him|her|them|it)\.?$/i.test(message)) {
+  // "Who is X?" / "What is X?" / "Tell me about X" → direct web search
+  // This bypasses the LLM planner which tends to hallucinate answers for unfamiliar names.
+  const factualMatch = message.match(
+    /^(?:who is|who are|who was|what is|what are|what was|tell me about|what do you know about)\s+(.+?)(?:\?|\.)?$/i
+  );
+  if (factualMatch) {
+    const subject = cleanSearchQuery(factualMatch[1]);
+    if (subject && subject.length > 1) {
+      return {
+        name: "web_search",
+        arguments: { query: subject, limit: 5 },
+      };
+    }
+  }
+
+  if (
+    /^(?:google|search the web|search web)\s+(?:for\s+)?(?:him|her|them|it)\.?$/i.test(
+      message
+    ) ||
+    /^look\s+(?:him|her|them|it)\s+up\.?$/i.test(message) ||
+    /^lookup\s+(?:him|her|them|it)\.?$/i.test(message)
+  ) {
     const inferred = inferSearchQueryFromHistory(recentMessages);
     if (inferred) {
       return {
@@ -893,6 +1073,38 @@ function parseToolRegistryCall(message: string): ToolCall | null {
   ) {
     return { name: "tool_registry_list", arguments: {} };
   }
+
+  return null;
+}
+
+function parseWorkspaceToolCall(message: string): ToolCall | null {
+  // "what do you know about me" → read user profile
+  if (
+    /\bwhat do you know about me\b/i.test(message) ||
+    /\byour? (?:notes|file|profile) (?:on|about) me\b/i.test(message)
+  ) {
+    return { name: "workspace_read", arguments: { path: "user.md" } };
+  }
+
+  // "check your context" / "what are you working on"
+  if (
+    /\byour? (?:current )?context\b/i.test(message) ||
+    /\bwhat are you (?:working on|focused on|tracking)\b/i.test(message)
+  ) {
+    return { name: "workspace_read", arguments: { path: "context.md" } };
+  }
+
+  // "check your workspace" / "list your files"
+  if (
+    /\byour? (?:workspace|files|home)\b/i.test(message) ||
+    /\bwhat'?s in (?:your )?workspace\b/i.test(message)
+  ) {
+    return { name: "workspace_list", arguments: { directory: "" } };
+  }
+
+  // "write that down" / "note that" / "jot this down" / "remember this about me"
+  // These need LLM planning since the content must be extracted — let the planner handle it
+  // by returning null and letting shouldAttemptToolUse trigger the planner
 
   return null;
 }
@@ -1062,6 +1274,87 @@ function cleanSearchQuery(value: string): string {
     .replace(/^who\s+/i, "")
     .replace(/^what\s+/i, "")
     .trim();
+}
+
+interface WebSearchToolOutput {
+  query?: string;
+  provider?: string;
+  status?: "ok" | "weak" | "unavailable";
+  liveSearchAvailable?: boolean;
+  warning?: string | null;
+  error?: string | null;
+  topResultContent?: string | null;
+  results?: Array<{
+    title?: string;
+    url?: string;
+    content?: string;
+  }>;
+}
+
+function formatWebSearchToolResult(result: ToolExecutionResult): string {
+  if (!result.ok) {
+    return `Tool web_search status: unavailable\nWarning: ${result.error || "Live Google search failed."}\nCRITICAL: Tell the user live Google search failed before giving any fallback answer. Do not claim you searched the web.`;
+  }
+
+  const output = asWebSearchToolOutput(result.output);
+  const status = output?.status || "unavailable";
+  const provider = output?.provider || "google";
+  const warning = output?.warning || output?.error || null;
+  const results = Array.isArray(output?.results)
+    ? output.results.filter(
+        (item) =>
+          typeof item?.title === "string" &&
+          item.title.trim().length > 0 &&
+          typeof item?.url === "string" &&
+          item.url.trim().length > 0
+      )
+    : [];
+
+  if (status === "ok") {
+    const topContent = typeof output?.topResultContent === "string" && output.topResultContent.length > 0
+      ? `\n\nEnriched content from top result (${results[0]?.title || "page"}):\n${output.topResultContent}`
+      : "";
+
+    return `Tool web_search status: ok\nProvider: ${provider}\nLive search available: yes\nResults:\n${formatSearchResults(
+      results.map((item) => ({
+        title: item.title!.trim(),
+        url: item.url!.trim(),
+        content: typeof item.content === "string" ? item.content.trim() : "",
+      }))
+    )}${topContent}\nCRITICAL: Answer from these live results. Do not present prior knowledge as if it came from live search.`;
+  }
+
+  if (status === "weak") {
+    const resultsText =
+      results.length > 0
+        ? `\nThin live results:\n${formatSearchResults(
+            results.map((item) => ({
+              title: item.title!.trim(),
+              url: item.url!.trim(),
+              content:
+                typeof item.content === "string" ? item.content.trim() : "",
+            }))
+          )}`
+        : "";
+
+    return `Tool web_search status: weak\nProvider: ${provider}\nLive search available: ${
+      output?.liveSearchAvailable ? "yes" : "no"
+    }\nWarning: ${
+      warning || "Live Google search returned thin or inconclusive results."
+    }${resultsText}\nCRITICAL: Tell the user the live web results were thin or inconclusive before giving any cautious fallback answer.`;
+  }
+
+  return `Tool web_search status: unavailable\nProvider: ${provider}\nLive search available: no\nWarning: ${
+    warning || "Live Google search is unavailable right now."
+  }\nCRITICAL: Tell the user live Google search was unavailable before giving any fallback answer. Do not claim you searched the web.`;
+}
+
+function asWebSearchToolOutput(value: unknown): WebSearchToolOutput | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return value as WebSearchToolOutput;
 }
 
 function extractLikelyProperNounQuery(content: string): string | null {
