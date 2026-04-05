@@ -25,6 +25,7 @@ final class ChatViewModel: ObservableObject {
   private var completionContinuations: [String: CheckedContinuation<NicoleMessage?, Never>] = [:]
   private var completedAssistantResults: [String: NicoleMessage?] = [:]
   private weak var voiceController: NicoleVoiceController?
+  private var voiceStreamingIDs: Set<String> = []
 
   func attachVoiceController(_ controller: NicoleVoiceController) {
     voiceController = controller
@@ -57,7 +58,7 @@ final class ChatViewModel: ObservableObject {
 
   func send(
     baseURLString: String,
-    settings: AppSettings,
+    settings _: AppSettings,
     attachmentURL: URL? = nil
   ) async -> Bool {
     let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -95,7 +96,6 @@ final class ChatViewModel: ObservableObject {
     guard let assistantID = await beginStreamSend(
       message: trimmed,
       baseURLString: baseURLString,
-      settings: settings,
       clearInputOnSuccess: true
     ) else {
       isSending = false
@@ -118,37 +118,119 @@ final class ChatViewModel: ObservableObject {
     isSending = true
     connectionState = .syncing
     backendOrigin = await apiClient.normalizedOriginString(baseURLString: baseURLString)
+    lastRequestURL = try? await apiClient.streamURLString(baseURLString: baseURLString)
 
-    return await beginStreamSend(
+    let assistantID = enqueueAssistantExchange(
       message: trimmed,
+      clearInputOnSuccess: false,
+      isThoughtOpen: true
+    )
+
+    Task { @MainActor [weak self] in
+      await self?.performVisionBackedStreamSend(
+        baseURLString: baseURLString,
+        settings: settings,
+        message: trimmed,
+        assistantID: assistantID
+      )
+    }
+
+    return assistantID
+  }
+
+  func sendVisionMessage(
+    question: String,
+    baseURLString: String,
+    settings: AppSettings
+  ) async -> NicoleMessage? {
+    guard !isSending else { return nil }
+
+    errorText = nil
+    isSending = true
+    connectionState = .syncing
+    backendOrigin = await apiClient.normalizedOriginString(baseURLString: baseURLString)
+    lastRequestURL = try? await apiClient.streamURLString(baseURLString: baseURLString)
+
+    let assistantID = enqueueAssistantExchange(
+      message: question,
+      clearInputOnSuccess: false,
+      isThoughtOpen: true
+    )
+
+    let useStreamingTTS = voiceController?.isStreamingTTS == true
+    if useStreamingTTS {
+      voiceStreamingIDs.insert(assistantID)
+    }
+
+    await performVisionBackedStreamSend(
       baseURLString: baseURLString,
       settings: settings,
-      clearInputOnSuccess: false
+      message: question,
+      assistantID: assistantID
     )
+
+    return currentAssistantMessage(id: assistantID)
   }
 
   func sendVoiceMessage(
     _ message: String,
     baseURLString: String,
-    settings: AppSettings
+    settings _: AppSettings
   ) async -> NicoleMessage? {
     let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
 
-    guard let assistantID = await sendCompactMessage(
-      trimmed,
-      baseURLString: baseURLString,
-      settings: settings
-    ) else {
+    let useStreamingTTS = voiceController?.isStreamingTTS == true
+
+    errorText = nil
+    isSending = true
+    connectionState = .syncing
+
+    let userMessage = NicoleMessage(role: .user, content: trimmed)
+    messages.append(userMessage)
+
+    let assistantID = UUID().uuidString
+    rawAssistantBuffers[assistantID] = ""
+    messages.append(
+      NicoleMessage(
+        id: assistantID,
+        role: .assistant,
+        content: "",
+        isStreaming: true,
+        thoughtContent: nil,
+        isThoughtOpen: false
+      )
+    )
+
+    if useStreamingTTS {
+      voiceStreamingIDs.insert(assistantID)
+    }
+
+    do {
+      try await apiClient.streamVoiceReply(
+        baseURLString: baseURLString,
+        message: trimmed
+      ) { [weak self] chunk in
+        await self?.appendAssistantChunk(chunk, assistantID: assistantID)
+      }
+
+      finishAssistantMessage(id: assistantID)
+      connectionState = .connected(
+        messageCount: messages.filter { $0.role != .system }.count
+      )
+      isSending = false
+
+      if let index = messages.firstIndex(where: { $0.id == assistantID }) {
+        return messages[index]
+      }
       return nil
-    }
-
-    if let completedResult = completedAssistantResults.removeValue(forKey: assistantID) {
-      return completedResult
-    }
-
-    return await withCheckedContinuation { continuation in
-      completionContinuations[assistantID] = continuation
+    } catch {
+      replaceAssistantPlaceholder(id: assistantID, content: "I'm unavailable right now.")
+      voiceStreamingIDs.remove(assistantID)
+      errorText = error.localizedDescription
+      connectionState = .failed(error.localizedDescription)
+      isSending = false
+      return nil
     }
   }
 
@@ -157,11 +239,32 @@ final class ChatViewModel: ObservableObject {
   private func beginStreamSend(
     message: String,
     baseURLString: String,
-    settings: AppSettings,
     clearInputOnSuccess: Bool
   ) async -> String? {
     lastRequestURL = try? await apiClient.streamURLString(baseURLString: baseURLString)
+    let assistantID = enqueueAssistantExchange(
+      message: message,
+      clearInputOnSuccess: clearInputOnSuccess,
+      isThoughtOpen: true
+    )
 
+    Task { @MainActor [weak self] in
+      await self?.performStreamSend(
+        baseURLString: baseURLString,
+        message: message,
+        assistantID: assistantID,
+        context: nil
+      )
+    }
+
+    return assistantID
+  }
+
+  private func enqueueAssistantExchange(
+    message: String,
+    clearInputOnSuccess: Bool,
+    isThoughtOpen: Bool
+  ) -> String {
     let userMessage = NicoleMessage(role: .user, content: message)
     messages.append(userMessage)
 
@@ -178,29 +281,86 @@ final class ChatViewModel: ObservableObject {
         content: "",
         isStreaming: true,
         thoughtContent: nil,
-        isThoughtOpen: true
+        isThoughtOpen: isThoughtOpen
       )
     )
 
-    let context = await WorkspaceContextProvider.currentContext(settings: settings)
+    return assistantID
+  }
 
-    Task { @MainActor [weak self] in
-      await self?.performStreamSend(
-        baseURLString: baseURLString,
-        message: message,
-        assistantID: assistantID,
-        context: context
+  private func performVisionBackedStreamSend(
+    baseURLString: String,
+    settings: AppSettings,
+    message: String,
+    assistantID: String
+  ) async {
+    let seedContext = await WorkspaceContextProvider.compactSeedContext()
+    let imageBase64 = await ScreenEnrichmentEngine.shared.captureScreenAsBase64()
+
+    var context: NicoleWorkspaceContextPayload?
+
+    if let imageBase64 {
+      let analysis = await LocalVisionAnalyzer.shared.analyzeScreen(
+        imageBase64: imageBase64,
+        question: message,
+        contextHint: seedContext
       )
+
+      if let analysis {
+        context = makeVisionBackedContext(
+          seedContext: seedContext,
+          analysis: analysis
+        )
+      }
     }
 
-    return assistantID
+    if context == nil {
+      context = await WorkspaceContextProvider.compactContext(settings: settings) ?? seedContext
+    }
+
+    await performStreamSend(
+      baseURLString: baseURLString,
+      message: message,
+      assistantID: assistantID,
+      context: context
+    )
+  }
+
+  private func makeVisionBackedContext(
+    seedContext: NicoleWorkspaceContextPayload?,
+    analysis: NicoleVisionAnalysis
+  ) -> NicoleWorkspaceContextPayload {
+    NicoleWorkspaceContextPayload(
+      surface: "macos",
+      activeApp: seedContext?.activeApp ?? analysis.appOrSurface,
+      windowTitle: seedContext?.windowTitle,
+      selectedText: seedContext?.selectedText,
+      clipboardText: nil,
+      currentUrl: seedContext?.currentUrl,
+      currentFilePath: seedContext?.currentFilePath,
+      visibleContent: analysis.visibleText ?? seedContext?.visibleContent,
+      visualSummary: analysis.summary,
+      visualElements: analysis.importantElements.isEmpty ? nil : analysis.importantElements,
+      visualIssues: analysis.possibleIssues.isEmpty ? nil : analysis.possibleIssues,
+      visualConfidence: analysis.confidence,
+      captureNotes: analysis.captureNotes,
+      note: "Fresh local compact screenshot analysis. Use this visual reading as the primary workspace grounding."
+    )
+  }
+
+  private func currentAssistantMessage(id: String) -> NicoleMessage? {
+    guard let index = messages.firstIndex(where: { $0.id == id }) else {
+      return nil
+    }
+
+    return messages[index]
   }
 
   private func performStreamSend(
     baseURLString: String,
     message: String,
     assistantID: String,
-    context: NicoleWorkspaceContextPayload
+    context: NicoleWorkspaceContextPayload?
   ) async {
     do {
       try await apiClient.streamReply(
@@ -221,6 +381,7 @@ final class ChatViewModel: ObservableObject {
         id: assistantID,
         content: "I'm unavailable right now."
       )
+      voiceStreamingIDs.remove(assistantID)
       if let continuation = completionContinuations.removeValue(forKey: assistantID) {
         continuation.resume(returning: nil)
       } else {
@@ -262,6 +423,11 @@ final class ChatViewModel: ObservableObject {
 
     message.content = parsed.visibleContent
     messages[index] = message
+
+    // Feed streaming content to voice controller for sentence-by-sentence TTS
+    if voiceStreamingIDs.contains(assistantID), !parsed.visibleContent.isEmpty {
+      voiceController?.handleStreamingContent(parsed.visibleContent)
+    }
   }
 
   private func finishAssistantMessage(id: String) {
@@ -277,7 +443,10 @@ final class ChatViewModel: ObservableObject {
       messages[index].isThoughtOpen = false
     }
 
-    if !messages[index].content.isEmpty {
+    if voiceStreamingIDs.remove(id) != nil {
+      // Streaming TTS — send any remaining text and signal completion
+      voiceController?.finishStreamingTTS(remainingContent: messages[index].content)
+    } else if !messages[index].content.isEmpty {
       voiceController?.handleCompletedAssistantMessage(messages[index])
     }
 

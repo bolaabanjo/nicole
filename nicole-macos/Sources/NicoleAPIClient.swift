@@ -62,6 +62,48 @@ actor NicoleAPIClient {
     ).url?.absoluteString ?? ""
   }
 
+  func voiceURLString(baseURLString: String) throws -> String {
+    try makeRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/voice",
+      method: "POST"
+    ).url?.absoluteString ?? ""
+  }
+
+  func streamVoiceReply(
+    baseURLString: String,
+    message: String,
+    onChunk: @escaping @Sendable (String) async -> Void
+  ) async throws {
+    let body = NicoleVoiceRequestBody(message: message)
+    let request = try makeJSONRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/voice",
+      body: body
+    )
+
+    let (bytes, response) = try await session.bytes(for: request)
+    try validate(response: response, data: nil, requestURL: request.url?.absoluteString)
+
+    var buffer = Data()
+
+    for try await byte in bytes {
+      buffer.append(byte)
+
+      if let fragment = String(data: buffer, encoding: .utf8), !fragment.isEmpty {
+        await onChunk(fragment)
+        buffer.removeAll(keepingCapacity: true)
+      }
+    }
+
+    if !buffer.isEmpty {
+      let fragment = String(decoding: buffer, as: UTF8.self)
+      if !fragment.isEmpty {
+        await onChunk(fragment)
+      }
+    }
+  }
+
   func ingestURLString(baseURLString: String) throws -> String {
     try makeRequest(
       baseURLString: baseURLString,
@@ -103,6 +145,24 @@ actor NicoleAPIClient {
         await onChunk(fragment)
       }
     }
+  }
+
+  func analyzeVision(
+    baseURLString: String,
+    imageBase64: String,
+    question: String?
+  ) async throws -> NicoleVisionAnalysis {
+    let body = NicoleVisionRequestBody(image: imageBase64, question: question)
+    let request = try makeJSONRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/vision",
+      body: body
+    )
+
+    let (data, response) = try await session.data(for: request)
+    try validate(response: response, data: data, requestURL: request.url?.absoluteString)
+
+    return try JSONDecoder().decode(NicoleVisionAnalysisResponse.self, from: data).analysis
   }
 
   func ingestFile(baseURLString: String, fileURL: URL) async throws -> NicoleIngestResult {
