@@ -93,69 +93,12 @@ struct VoiceModeView: View {
   }
 
   private var orbView: some View {
-    let reactivity = normalizedReactivity
-    let baseSize: CGFloat = 140
-
-    return ZStack {
-      // Outer glow layer 3 — very diffuse
-      Circle()
-        .fill(orbGradient.opacity(0.08))
-        .frame(width: baseSize * 2.8, height: baseSize * 2.8)
-        .blur(radius: 60)
-        .scaleEffect(1.0 + breathePhase * 0.06 + reactivity * 0.15)
-
-      // Outer glow layer 2
-      Circle()
-        .fill(orbGradient.opacity(0.14))
-        .frame(width: baseSize * 2.0, height: baseSize * 2.0)
-        .blur(radius: 40)
-        .scaleEffect(1.0 + breathePhase * 0.05 + reactivity * 0.12)
-
-      // Outer glow layer 1
-      Circle()
-        .fill(orbGradient.opacity(0.22))
-        .frame(width: baseSize * 1.5, height: baseSize * 1.5)
-        .blur(radius: 24)
-        .scaleEffect(1.0 + breathePhase * 0.04 + reactivity * 0.1)
-
-      // Main orb body
-      Circle()
-        .fill(
-          RadialGradient(
-            colors: orbColors,
-            center: .center,
-            startRadius: 0,
-            endRadius: baseSize * 0.6
-          )
-        )
-        .frame(width: baseSize, height: baseSize)
-        .blur(radius: 1)
-        .scaleEffect(1.0 + breathePhase * 0.03 + reactivity * 0.08)
-
-      // Inner bright core
-      Circle()
-        .fill(
-          RadialGradient(
-            colors: [Color.white.opacity(0.6), Color.white.opacity(0)],
-            center: .center,
-            startRadius: 0,
-            endRadius: baseSize * 0.25
-          )
-        )
-        .frame(width: baseSize * 0.5, height: baseSize * 0.5)
-        .scaleEffect(1.0 + breathePhase * 0.05 + reactivity * 0.15)
-
-      // Rotating accent highlight
-      Ellipse()
-        .fill(orbAccentGradient)
-        .frame(width: baseSize * 0.7, height: baseSize * 0.3)
-        .blur(radius: 18)
-        .offset(y: -baseSize * 0.15)
-        .rotationEffect(.degrees(rotationAngle))
-        .opacity(0.3 + reactivity * 0.2)
-    }
-    .animation(.easeOut(duration: 0.08), value: reactivity)
-    .contentShape(Circle().scale(2.0))
+    FluidOrbView(
+      colors: orbColors,
+      reactivity: normalizedReactivity
+    )
+    .animation(.easeInOut(duration: 0.8), value: orbColors)
+    .contentShape(Circle().scale(1.5))
     .onTapGesture {
       handleOrbTap()
     }
@@ -182,50 +125,29 @@ struct VoiceModeView: View {
     switch orbState {
     case .idle:
       return [
-        Color(red: 0.3, green: 0.5, blue: 0.95),
-        Color(red: 0.15, green: 0.3, blue: 0.75),
-        Color(red: 0.08, green: 0.15, blue: 0.5),
+        Color(red: 0.25, green: 0.35, blue: 0.9),  // Deep Blue
+        Color(red: 0.45, green: 0.25, blue: 0.85), // Soft Violet
+        Color(red: 0.1, green: 0.15, blue: 0.45),  // Indigo Shadow
       ]
     case .listening:
       return [
-        Color(red: 0.2, green: 0.7, blue: 1.0),
-        Color(red: 0.1, green: 0.5, blue: 0.9),
-        Color(red: 0.05, green: 0.25, blue: 0.65),
+        Color(red: 0.15, green: 0.85, blue: 1.0),  // Bright Cyan
+        Color(red: 0.2, green: 0.5, blue: 0.95),   // Azure
+        Color(red: 0.1, green: 0.9, blue: 0.6),    // Emerald hit
       ]
     case .thinking:
       return [
-        Color(red: 0.55, green: 0.35, blue: 0.95),
-        Color(red: 0.35, green: 0.2, blue: 0.75),
-        Color(red: 0.18, green: 0.1, blue: 0.5),
+        Color(red: 0.65, green: 0.3, blue: 1.0),   // Vibrant Purple
+        Color(red: 1.0, green: 0.4, blue: 0.7),    // Hot Pink
+        Color(red: 0.3, green: 0.2, blue: 0.8),    // Deep Navy
       ]
     case .speaking:
       return [
-        Color(red: 0.15, green: 0.8, blue: 0.7),
-        Color(red: 0.1, green: 0.55, blue: 0.65),
-        Color(red: 0.05, green: 0.3, blue: 0.45),
+        Color(red: 0.1, green: 0.95, blue: 0.75),  // Mint/Teal
+        Color(red: 0.05, green: 0.7, blue: 0.9),   // Sky Blue
+        Color(red: 1.0, green: 1.0, blue: 1.0),    // Pure White Core
       ]
     }
-  }
-
-  private var orbGradient: RadialGradient {
-    RadialGradient(
-      colors: orbColors.map { $0.opacity(0.8) },
-      center: .center,
-      startRadius: 0,
-      endRadius: 200
-    )
-  }
-
-  private var orbAccentGradient: RadialGradient {
-    RadialGradient(
-      colors: [
-        Color.white.opacity(0.3),
-        orbColors.first?.opacity(0.1) ?? Color.clear,
-      ],
-      center: .center,
-      startRadius: 0,
-      endRadius: 40
-    )
   }
 
   private func handleOrbTap() {

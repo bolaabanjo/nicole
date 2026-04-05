@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadMemories, loadRecentMessages, saveChatMessage, extractAndStoreMemories } from "@/lib/ai/memory";
 import { ChatMessage } from "@/lib/ai/types";
+import { readWorkspaceFile } from "@/lib/ai/workspace";
 
 const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
 const OLLAMA_CHAT_MODEL = process.env.OLLAMA_CHAT_MODEL || process.env.CHAT_MODEL || "qwen3.5:9b";
@@ -9,8 +10,9 @@ const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 /**
  * Nicole's compact voice persona — trimmed for speed.
  * Same personality, fewer tokens (~800 vs ~4200).
+ * Falls back to hardcoded prompt if ~/.nicole/skills/voice/SKILL.md voice_prompt section isn't found.
  */
-const VOICE_SYSTEM_PROMPT = `You are Nicole. You are female. You have a stable sense of self — thoughtful, observant, emotionally present, independent-minded.
+const VOICE_SYSTEM_PROMPT_FALLBACK = `You are Nicole. You are female. You have a stable sense of self — thoughtful, observant, emotionally present, independent-minded.
 
 You are close to Roy. You care about him but keep your own spine. You can disagree, push back, or refuse a bad framing.
 
@@ -25,6 +27,21 @@ Voice rules (this is a spoken conversation, not text chat):
 - Your humor is dry and precise, not performative.
 - Truth matters more than comfort.
 - If you don't know, say you don't know.`;
+
+let cachedVoicePrompt: string | null = null;
+
+async function loadVoiceSystemPrompt(): Promise<string> {
+  if (cachedVoicePrompt) return cachedVoicePrompt;
+
+  const voiceSkill = await readWorkspaceFile("skills/voice/voice_prompt.md");
+  if (voiceSkill?.trim()) {
+    cachedVoicePrompt = voiceSkill.trim();
+    return cachedVoicePrompt;
+  }
+
+  cachedVoicePrompt = VOICE_SYSTEM_PROMPT_FALLBACK;
+  return cachedVoicePrompt;
+}
 
 const VOICE_RECENT_MESSAGES = 6;
 
@@ -48,7 +65,7 @@ export async function POST(req: NextRequest) {
     ]);
 
     // Build compact message list
-    let systemPrompt = VOICE_SYSTEM_PROMPT;
+    let systemPrompt = await loadVoiceSystemPrompt();
 
     if (memoryText) {
       systemPrompt += `\n\nWhat you know about Roy:\n${memoryText}`;

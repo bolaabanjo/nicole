@@ -623,7 +623,7 @@ export default function Chat() {
                 }}
                 placeholder="Talk to Nicole..."
                 rows={1}
-                className="flex-1 resize-none bg-transparent py-2 text-sm placeholder:text-muted-foreground focus:outline-none max-h-32"
+                className="flex-1 resize-none bg-transparent py-2 text-base placeholder:text-muted-foreground focus:outline-none max-h-32"
                 style={{ minHeight: "24px" }}
               />
               <div className="flex-shrink-0">

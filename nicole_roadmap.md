@@ -135,22 +135,93 @@ Everything runs on one M4 Pro Mac. No external dependencies.
 
 ---
 
+## Phase 3.5 — Workspace (~/.nicole/) ✅ COMPLETE
+
+Nicole has her own home directory on the Mac. Inspired by OpenClaw's architecture.
+
+```
+~/.nicole/
+├── soul.md              # personality — who Nicole is (single source of truth)
+├── identity.md          # name, capabilities, infrastructure
+├── user.md              # everything about Roy
+├── tools.md             # tool registry (ready + planned)
+├── config.md            # server URLs, model preferences, paths
+├── context.md           # current state, active work
+├── memory/
+│   ├── index.md         # long-term memory index
+│   └── YYYY-MM-DD.md    # daily context notes
+└── skills/
+    ├── voice/SKILL.md
+    ├── vision/SKILL.md
+    ├── research/SKILL.md
+    ├── email/SKILL.md
+    ├── calendar/SKILL.md
+    └── study/SKILL.md
+```
+
+| Capability | Status |
+|-----------|--------|
+| Soul file (personality as editable markdown) | ✅ Done |
+| Identity file (who she is, what she runs on) | ✅ Done |
+| User file (everything about Roy) | ✅ Done |
+| Tools registry (all 47 tools documented) | ✅ Done |
+| Config file (server URLs, model prefs, paths) | ✅ Done |
+| Context file (current state, active work) | ✅ Done |
+| Memory directory (index + daily notes) | ✅ Done |
+| Skill files (self-describing per skill) | ✅ Done |
+| Server reads soul.md on startup | ✅ Done |
+| Nicole can write to her own workspace files | ✅ Done (workspace_read/write/list/append_daily tools) |
+| Skill auto-discovery from skills/ directory | ✅ Done (injected into system prompt) |
+
+---
+
+## Phase 3.7 — Heartbeat (Proactive Mode) ✅ COMPLETE
+
+Nicole checks in without being asked. She monitors calendar, reminders, screen time, and time of day.
+
+| Capability | Status |
+|-----------|--------|
+| Heartbeat engine (server-side check runner) | ✅ Done |
+| Calendar check (upcoming meetings within 30 min) | ✅ Done |
+| Reminders check (due/overdue reminders) | ✅ Done |
+| Screen time tracking (prolonged single-app usage) | ✅ Done |
+| Time awareness (late night detection) | ✅ Done |
+| LLM decision layer ("should I tell Roy?") | ✅ Done |
+| macOS notification delivery | ✅ Done |
+| Voice nudge (speaks if voice mode active) | ✅ Done |
+| Rate limiting (cooldown, max nudges/hour) | ✅ Done |
+| Quiet hours (23:30–07:00, urgent overrides) | ✅ Done |
+| Heartbeat state persistence | ✅ Done |
+| Config file (~/.nicole/heartbeat.md) | ✅ Done |
+| Heartbeat API endpoint (/api/nicole/heartbeat) | ✅ Done |
+| Mac app polling (NicoleHeartbeatController) | ✅ Done |
+| Email check | Disabled (ready, needs testing) |
+| Health metrics (Apple Watch / HealthKit) | Not started (Phase 5) |
+| Weather alerts | Not started |
+| Morning briefing | Not started |
+
+---
+
 ## What's Next
 
 ---
 
-## Phase 3 — Eyes (Vision)
+## Phase 3 — Eyes (Vision) ✅ COMPLETE
 
-Nicole can see what you see or what you show her.
+Nicole can see what's on screen via a local multimodal model.
 
-| Capability | Tech Options | Status |
-|-----------|-------------|--------|
-| Screen understanding | Screenshots → local multimodal model (Qwen-VL / LLaVA) | Not started (capture infrastructure ready) |
+| Capability | Tech | Status |
+|-----------|------|--------|
+| Screen capture | ScreenCaptureKit → JPEG base64 | ✅ Done |
+| Vision model | qwen3-vl:8b via Ollama (6.1GB) | ✅ Done |
+| Vision endpoint | `/api/nicole/vision` — streaming, think:false | ✅ Done |
+| Voice → vision routing | Trigger phrases ("look at my screen", etc.) | ✅ Done |
+| Screen OCR (workspace context) | VNRecognizeTextRequest (.accurate) | ✅ Done (Phase 2.5) |
 | Camera input | AVFoundation → multimodal LLM | Not started |
 | Document scanning | Camera → OCR → ingestion pipeline | Not started |
-| Continuous vision | Periodic screenshots → summarize what's happening | Not started |
+| Continuous vision | Periodic screenshots → summarize | Not started |
 
-**Prerequisite:** Run a local vision model alongside Qwen 3.5. M4 Pro can handle a 7B vision model.
+**Note:** M4 Pro 24GB runs chat (qwen3.5:9b) or vision (qwen3-vl:8b) one at a time — Ollama swaps automatically.
 
 ---
 
@@ -246,10 +317,14 @@ Nicole controls your Mac — opens apps, clicks, types, browses.
 ✅ DONE     Phase 2.5: Native Mac app (Swift) + screen awareness
 ✅ DONE     Infrastructure: Everything on one Mac, auto-start on login
  │
- ├── NEXT   Phase 3: Vision (local multimodal model)
+ ├── ✅ DONE  Phase 3: Vision (local multimodal model)
+ │
+ ├── ✅ DONE  Phase 3.5: Workspace (~/.nicole/) — soul, identity, tools, skills, memory as files
+ │
+ ├── ✅ DONE  Phase 3.7: Heartbeat — proactive nudges (calendar, reminders, screen time)
  │
  ├── NEXT   Phase 4: More integrations (GitHub, WhatsApp, Spotify)
- │            + Plugin system
+ │            + Plugin system (skill auto-discovery from ~/.nicole/skills/)
  │
  ├── LATER  Phase 4.5: Agentic computer use + approval system
  │

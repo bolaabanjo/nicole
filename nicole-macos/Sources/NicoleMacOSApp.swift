@@ -6,6 +6,7 @@ struct NicoleMacOSApp: App {
   @StateObject private var settings = AppSettings()
   @StateObject private var viewModel = ChatViewModel()
   @StateObject private var voiceController = NicoleVoiceController()
+  @StateObject private var heartbeatController = NicoleHeartbeatController()
 
   var body: some Scene {
     WindowGroup("Nicole") {
@@ -22,7 +23,8 @@ struct NicoleMacOSApp: App {
           appDelegate.configure(
             settings: settings,
             viewModel: viewModel,
-            voiceController: voiceController
+            voiceController: voiceController,
+            heartbeatController: heartbeatController
           )
           CompactWindowManager.shared.setup(
             settings: settings,

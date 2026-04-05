@@ -18,15 +18,15 @@ engines:
   - name: duckduckgo
     engine: duckduckgo
     shortcut: ddg
-    disabled: false
+    disabled: true
   - name: wikipedia
     engine: wikipedia
     shortcut: wp
-    disabled: false
+    disabled: true
   - name: bing
     engine: bing
     shortcut: bi
-    disabled: false
+    disabled: true
 
 outgoing:
   request_timeout: 8
