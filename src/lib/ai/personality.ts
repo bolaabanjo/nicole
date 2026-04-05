@@ -301,6 +301,7 @@ const NICOLE_SYSTEM_SECTIONS = [
 
 /**
  * Nicole's core identity. This is who she is.
+ * This hardcoded version is the fallback — the primary source is ~/.nicole/soul.md.
  */
 export const NICOLE_SYSTEM_PROMPT = NICOLE_SYSTEM_SECTIONS.join("\n\n");
 
@@ -310,14 +311,23 @@ function appendSection(prompt: string, title: string, body: string): string {
 
 /**
  * Build Nicole's full system prompt with memories and source context.
+ * Loads personality from ~/.nicole/soul.md (falls back to hardcoded).
+ * Discovers skills from ~/.nicole/skills/ and includes awareness block.
  */
-export function buildSystemPrompt(opts: {
+export async function buildSystemPrompt(opts: {
   memories?: string;
   conversationSummaries?: string;
   sourceContext?: string;
   workspaceContext?: string;
-}): string {
-  let prompt = NICOLE_SYSTEM_PROMPT;
+}): Promise<string> {
+  const { loadSoulPrompt, buildSkillAwarenessBlock } = await import("./workspace");
+
+  let prompt = await loadSoulPrompt();
+
+  const skillBlock = await buildSkillAwarenessBlock();
+  if (skillBlock) {
+    prompt = `${prompt}\n\n${skillBlock}`;
+  }
 
   if (opts.conversationSummaries) {
     prompt = appendSection(
