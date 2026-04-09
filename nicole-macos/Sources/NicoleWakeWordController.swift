@@ -61,9 +61,9 @@ final class NicoleWakeWordController: NSObject, ObservableObject, AudioConsumer 
 
     state = .requestingPermissions
 
-    let micGranted = await NicoleSpeechPermissionManager.requestMicrophonePermission()
-    guard micGranted else {
-      state = .failed("Microphone access is blocked. Enable it for Nicole or Xcode in Privacy & Security.")
+    let micPermissionState = await NicoleSpeechPermissionManager.requestMicrophonePermission()
+    guard micPermissionState == .authorized else {
+      state = .failed(messageForMicrophonePermissionState(micPermissionState))
       return
     }
 
@@ -181,5 +181,18 @@ final class NicoleWakeWordController: NSObject, ObservableObject, AudioConsumer 
       .replacingOccurrences(of: "[^a-z0-9\\s]", with: " ", options: .regularExpression)
       .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
       .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func messageForMicrophonePermissionState(_ state: NicolePermissionState) -> String {
+    switch state {
+    case .authorized:
+      return ""
+    case .notDetermined:
+      return "Microphone permission is still pending."
+    case .denied, .restricted:
+      return "Microphone access is blocked. Enable it for Nicole in Privacy & Security."
+    case let .unavailable(message):
+      return message
+    }
   }
 }

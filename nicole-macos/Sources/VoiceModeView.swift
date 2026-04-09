@@ -153,31 +153,81 @@ struct VoiceModeView: View {
   private func handleOrbTap() {
     switch orbState {
     case .idle:
-      voiceController.startAmbientCapture { transcript in
+      VoiceSessionManager.shared.beginCapture(on: .ambient)
+      voiceController.startAmbientCapture(
+        onProgressiveTranscript: { partial in
+          VoiceSessionManager.shared.updateProgressiveTranscript(
+            partial,
+            on: .ambient,
+            baseURLString: settings.baseURLString
+          )
+        },
+        onFinalTranscript: { transcript in
         Task { @MainActor in
           let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
           guard !trimmed.isEmpty else { return }
 
-          voiceController.beginStreamingTTS(onAllComplete: {})
-
-          let response = await viewModel.sendVoiceMessage(
-            trimmed,
-            baseURLString: settings.baseURLString,
-            settings: settings
+          let preparedTurn = await VoiceSessionManager.shared.finalizePreparation(
+            transcript: trimmed,
+            on: .ambient,
+            baseURLString: settings.baseURLString
           )
 
+          voiceController.beginStreamingTTS(on: .ambient) {
+            VoiceSessionManager.shared.markReplyCompleted(on: .ambient)
+          }
+          VoiceSessionManager.shared.markReplyStarted(
+            on: .ambient,
+            voiceTurnId: preparedTurn?.voiceTurnId
+          )
+
+          let response: NicoleMessage?
+
+          if Self.isVisionRequest(trimmed) {
+            response = await viewModel.sendVisionMessage(
+              question: trimmed,
+              baseURLString: settings.baseURLString,
+              settings: settings,
+              voiceSurface: .ambient,
+              preparedTurn: preparedTurn
+            )
+          } else {
+            response = await viewModel.sendVoiceMessage(
+              trimmed,
+              baseURLString: settings.baseURLString,
+              settings: settings,
+              surface: .ambient,
+              preparedTurn: preparedTurn
+            )
+          }
+
           if response == nil {
+            VoiceSessionManager.shared.markReplyCompleted(on: .ambient)
             voiceController.cancelStreamingTTS()
           }
         }
-      }
+      })
     case .listening:
       voiceController.stopListeningIfActive(on: .ambient)
     case .speaking:
       voiceController.stopSpeaking()
+      VoiceSessionManager.shared.markReplyCompleted(on: .ambient)
     case .thinking:
       break
     }
+  }
+
+  private static let visionTriggers = [
+    "look at", "what's on my screen", "what do you see", "what is this",
+    "what's this", "read this", "read my screen", "what am i looking at",
+    "explain this", "what's wrong", "check this", "see my screen",
+    "look at my screen", "what does this say", "can you see", "do you see",
+    "screen",
+  ]
+
+  private static func isVisionRequest(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    return visionTriggers.contains(where: { lower.contains($0) })
   }
 
   private var statusLabel: some View {

@@ -2,14 +2,14 @@ import AVFoundation
 import Speech
 
 struct NicoleSpeechPermissionResult {
-  let speechGranted: Bool
-  let microphoneGranted: Bool
+  let speechState: NicolePermissionState
+  let microphoneState: NicolePermissionState
   let promptedDuringRequest: Bool
 }
 
 enum NicoleSpeechPermissionManager {
   @MainActor
-  static func requestMicrophonePermission() async -> Bool {
+  static func requestMicrophonePermission() async -> NicolePermissionState {
     let status = AVCaptureDevice.authorizationStatus(for: .audio)
     return await requestMicrophoneAuthorization(currentStatus: status)
   }
@@ -19,47 +19,74 @@ enum NicoleSpeechPermissionManager {
     let speechStatus = SFSpeechRecognizer.authorizationStatus()
     let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
 
-    let speechGranted = await requestSpeechAuthorization(currentStatus: speechStatus)
-    let microphoneGranted = await requestMicrophoneAuthorization(currentStatus: microphoneStatus)
+    let speechState = await requestSpeechAuthorization(currentStatus: speechStatus)
+    let microphoneState = await requestMicrophoneAuthorization(currentStatus: microphoneStatus)
 
     return NicoleSpeechPermissionResult(
-      speechGranted: speechGranted,
-      microphoneGranted: microphoneGranted,
+      speechState: speechState,
+      microphoneState: microphoneState,
       promptedDuringRequest: speechStatus == .notDetermined || microphoneStatus == .notDetermined
     )
   }
 
-  nonisolated private static func requestSpeechAuthorization(currentStatus: SFSpeechRecognizerAuthorizationStatus) async -> Bool {
+  nonisolated private static func requestSpeechAuthorization(
+    currentStatus: SFSpeechRecognizerAuthorizationStatus
+  ) async -> NicolePermissionState {
     switch currentStatus {
     case .authorized:
-      return true
-    case .denied, .restricted:
-      return false
+      return .authorized
+    case .denied:
+      return .denied
+    case .restricted:
+      return .restricted
     case .notDetermined:
       return await withCheckedContinuation { continuation in
         SFSpeechRecognizer.requestAuthorization { authorizationStatus in
-          continuation.resume(returning: authorizationStatus == .authorized)
+          continuation.resume(
+            returning: mapSpeechAuthorizationStatus(authorizationStatus)
+          )
         }
       }
     @unknown default:
-      return false
+      return .unavailable("Speech recognition is unavailable right now.")
     }
   }
 
-  nonisolated private static func requestMicrophoneAuthorization(currentStatus: AVAuthorizationStatus) async -> Bool {
+  nonisolated private static func requestMicrophoneAuthorization(
+    currentStatus: AVAuthorizationStatus
+  ) async -> NicolePermissionState {
     switch currentStatus {
     case .authorized:
-      return true
-    case .denied, .restricted:
-      return false
+      return .authorized
+    case .denied:
+      return .denied
+    case .restricted:
+      return .restricted
     case .notDetermined:
       return await withCheckedContinuation { continuation in
         AVCaptureDevice.requestAccess(for: .audio) { granted in
-          continuation.resume(returning: granted)
+          continuation.resume(returning: granted ? .authorized : .denied)
         }
       }
     @unknown default:
-      return false
+      return .unavailable("Microphone access is unavailable right now.")
+    }
+  }
+
+  nonisolated private static func mapSpeechAuthorizationStatus(
+    _ status: SFSpeechRecognizerAuthorizationStatus
+  ) -> NicolePermissionState {
+    switch status {
+    case .authorized:
+      return .authorized
+    case .denied:
+      return .denied
+    case .restricted:
+      return .restricted
+    case .notDetermined:
+      return .notDetermined
+    @unknown default:
+      return .unavailable("Speech recognition is unavailable right now.")
     }
   }
 }

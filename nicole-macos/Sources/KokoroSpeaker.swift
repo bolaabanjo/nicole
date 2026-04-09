@@ -16,6 +16,7 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
   private var isFallbackMode = false
   private var meteringTimer: Timer?
   @Published private(set) var currentOutputLevel: Float = -60.0
+  var onPlaybackStart: (() -> Void)?
 
   override init() {
     let config = URLSessionConfiguration.default
@@ -32,6 +33,8 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
   private var isStreamingMode = false
   private var streamFinished = false
   private var streamingCompletion: (() -> Void)?
+  private var targetPrefetchCount = 1
+  private var queueUnderflowCount = 0
 
   var isSpeaking: Bool {
     audioPlayer?.isPlaying == true || fallbackSynthesizer.isSpeaking
@@ -59,7 +62,8 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
           player.prepareToPlay()
           self.audioPlayer = player
           self.startMetering()
-          let started = player.play()
+          _ = player.play()
+          self.onPlaybackStart?()
         } catch {
           firePendingCompletion()
         }
@@ -100,6 +104,8 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
     isStreamingMode = true
     streamFinished = false
     streamingCompletion = onAllComplete
+    targetPrefetchCount = 1
+    queueUnderflowCount = 0
   }
 
   func enqueueSentence(_ text: String) {
@@ -126,8 +132,13 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
   private func processStreamingQueue() {
     guard isStreamingMode else { return }
 
-    // Start synthesizing if idle and there are sentences waiting
-    if !isSynthesizing, !sentenceQueue.isEmpty {
+    if !streamFinished, !isSpeaking, prefetchedAudio.isEmpty, sentenceQueue.isEmpty == false {
+      queueUnderflowCount += 1
+      targetPrefetchCount = min(3, max(1, queueUnderflowCount + 1))
+    }
+
+    // Keep a small adaptive buffer ahead so Nicole doesn't stall between clauses.
+    if !isSynthesizing, prefetchedAudio.count < targetPrefetchCount, !sentenceQueue.isEmpty {
       synthesizeNextSentence()
     }
 
@@ -178,6 +189,7 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
       self.audioPlayer = player
       self.startMetering()
       player.play()
+      onPlaybackStart?()
     } catch {
       processStreamingQueue()
     }
@@ -196,6 +208,8 @@ final class KokoroSpeaker: NSObject, ObservableObject, AVAudioPlayerDelegate {
     prefetchedAudio = []
     isSynthesizing = false
     streamingCompletion = nil
+    targetPrefetchCount = 1
+    queueUnderflowCount = 0
   }
 
   func isAvailable() async -> Bool {
