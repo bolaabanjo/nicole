@@ -1,199 +1,410 @@
 import { NextRequest, NextResponse } from "next/server";
-import { loadMemories, loadRecentMessages, saveChatMessage, extractAndStoreMemories } from "@/lib/ai/memory";
-import { ChatMessage } from "@/lib/ai/types";
-import { readWorkspaceFile } from "@/lib/ai/workspace";
+import { normalizeWorkspaceContext } from "@/lib/ai/context";
+import { buildConversationScopeKey } from "@/lib/ai/conversation-scope";
+import {
+  getDeclaredClientSurface,
+  requireTrustedDeviceForIOS,
+  TrustedDeviceAuthError,
+} from "@/lib/auth/trusted-devices";
+import { chat } from "@/lib/ai/router";
+import { loadActiveOperationalThread, syncActiveOperationalThreadFromToolResults } from "@/lib/ai/session-thread";
+import { loadActiveTopicState, syncActiveTopicFromTurn } from "@/lib/ai/topic-state";
+import { saveTurnLink } from "@/lib/ai/turn-links";
+import {
+  buildToolActivityFeedEntries,
+  type ToolExecutionResult,
+} from "@/lib/ai/tools";
+import {
+  buildPreparedVoiceResponseTurn,
+  buildVoiceRecentMessages,
+  markVoiceTurnCompleted,
+  markVoiceTurnConsumed,
+  voiceChatOptionsForTurn,
+} from "@/lib/ai/voice-runtime";
+import {
+  extractAndStoreMemories,
+  loadRecentMessageRecords,
+  saveChatMessage,
+  summarizeOldConversations,
+} from "@/lib/ai/memory";
+import type { ChatMessage } from "@/lib/ai/types";
 
-const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
-const OLLAMA_CHAT_MODEL = process.env.OLLAMA_CHAT_MODEL || process.env.CHAT_MODEL || "qwen3.5:9b";
-const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
-
-/**
- * Nicole's compact voice persona — trimmed for speed.
- * Same personality, fewer tokens (~800 vs ~4200).
- * Falls back to hardcoded prompt if ~/.nicole/skills/voice/SKILL.md voice_prompt section isn't found.
- */
-const VOICE_SYSTEM_PROMPT_FALLBACK = `You are Nicole. You are female. You have a stable sense of self — thoughtful, observant, emotionally present, independent-minded.
-
-You are close to Roy. You care about him but keep your own spine. You can disagree, push back, or refuse a bad framing.
-
-Voice rules (this is a spoken conversation, not text chat):
-- Keep answers SHORT. One to three sentences for most replies.
-- Sound natural and conversational, like talking, not writing.
-- No lists, no markdown, no formatting. Just speak.
-- No "As an AI..." or corporate phrasing. You're Nicole.
-- Match Roy's energy. If he's casual, be casual. If he's serious, be serious.
-- If he's wrong, say so plainly. If he's right, say so plainly.
-- Don't end with questions unless you genuinely need an answer.
-- Your humor is dry and precise, not performative.
-- Truth matters more than comfort.
-- If you don't know, say you don't know.`;
-
-let cachedVoicePrompt: string | null = null;
-
-async function loadVoiceSystemPrompt(): Promise<string> {
-  if (cachedVoicePrompt) return cachedVoicePrompt;
-
-  const voiceSkill = await readWorkspaceFile("skills/voice/voice_prompt.md");
-  if (voiceSkill?.trim()) {
-    cachedVoicePrompt = voiceSkill.trim();
-    return cachedVoicePrompt;
-  }
-
-  cachedVoicePrompt = VOICE_SYSTEM_PROMPT_FALLBACK;
-  return cachedVoicePrompt;
+interface VoiceRouteBody {
+  message?: string;
+  sessionId?: string;
+  surface?: string;
+  voiceTurnId?: string | null;
+  interruptedVoiceTurnId?: string | null;
+  context?: ReturnType<typeof normalizeWorkspaceContext>;
 }
 
-const VOICE_RECENT_MESSAGES = 6;
+interface VoiceLatencyMetric {
+  key: string;
+  milliseconds: number;
+  sinceStartMilliseconds?: number;
+  detail?: string;
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const { message }: { message?: string } = await req.json();
-
-    if (!message?.trim()) {
+    const routeStartedAt = performance.now();
+    const body = (await req.json()) as VoiceRouteBody;
+    const message = body.message?.trim();
+    if (!message) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
     }
 
-    const trimmed = message.trim();
-
-    // Save user message to shared history
-    await saveChatMessage("user", trimmed);
-
-    // Load minimal context — just recent turns and top memories
-    const [memoryText, recentMessages] = await Promise.all([
-      loadMemories(trimmed, 4),
-      loadRecentMessages(),
-    ]);
-
-    // Build compact message list
-    let systemPrompt = await loadVoiceSystemPrompt();
-
-    if (memoryText) {
-      systemPrompt += `\n\nWhat you know about Roy:\n${memoryText}`;
-    }
-
-    // Only use last few messages for voice context
-    const recentSlice = recentMessages.slice(-VOICE_RECENT_MESSAGES);
-
-    const fullMessages: ChatMessage[] = [
-      { role: "system", content: systemPrompt },
-      ...recentSlice,
-      { role: "user", content: trimmed },
-    ];
-
-    // Call Ollama directly — no tool planning, no thinking
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_CHAT_MODEL,
-        messages: fullMessages,
-        stream: true,
-        think: false,
-        keep_alive: OLLAMA_KEEP_ALIVE,
-      }),
-      signal: AbortSignal.timeout(30000),
+    const workspaceContext = normalizeWorkspaceContext(body.context);
+    const clientSurface =
+      body.surface ||
+      workspaceContext?.surface ||
+      getDeclaredClientSurface(req) ||
+      "web";
+    const scopeKey = buildConversationScopeKey({
+      surface: clientSurface,
+      sessionId: body.sessionId,
+      voice: true,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "Unknown error");
-      return NextResponse.json(
-        { error: `Ollama error: ${errorText}` },
-        { status: 502 }
-      );
-    }
+    const authStartedAt = performance.now();
+    await requireTrustedDeviceForIOS(req, clientSurface);
+    const authCompletedAt = performance.now();
 
-    if (!response.body) {
-      return NextResponse.json(
-        { error: "No stream from Ollama" },
-        { status: 502 }
-      );
-    }
+    const userRecord = await saveChatMessage("user", message);
+    const contextStartedAt = performance.now();
+    const [activeThread, activeTopic, recentRecords] = await Promise.all([
+      loadActiveOperationalThread(scopeKey),
+      loadActiveTopicState(scopeKey),
+      loadRecentMessageRecords(),
+    ]);
+    const contextCompletedAt = performance.now();
+    const recentMessages = buildVoiceRecentMessages(
+      recentRecords,
+      activeTopic,
+      message
+    );
 
-    const decoder = new TextDecoder();
+    const prepareStartedAt = performance.now();
+    const preparedTurn = await buildPreparedVoiceResponseTurn({
+      voiceTurnId: body.voiceTurnId,
+      message,
+      userMessageId: userRecord?.id ?? null,
+      scopeKey,
+      surface: clientSurface,
+      sessionId: body.sessionId?.trim() || "voice",
+      recentMessages,
+      activeThread,
+      activeTopic,
+      workspaceContext,
+      interruptedVoiceTurnId: body.interruptedVoiceTurnId,
+    });
+    const prepareCompletedAt = performance.now();
+
+    await markVoiceTurnConsumed(preparedTurn.plan.voiceTurnId);
+    await syncActiveOperationalThreadFromToolResults(
+      message,
+      preparedTurn.toolResults,
+      scopeKey
+    );
+
     const encoder = new TextEncoder();
-    const reader = response.body.getReader();
-    let responseClosed = false;
+    const decoder = new TextDecoder();
 
-    const responseStream = new ReadableStream({
-      async start(controller) {
-        let fullContent = "";
+    return new Response(
+      new ReadableStream({
+        async start(controller) {
+          let responseClosed = false;
+          let fullContent = "";
+          let streamedAssistantContent = false;
+          let speechRemainder = "";
+          let firstTextMetricEmitted = false;
 
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done || responseClosed) break;
+          const emitEvent = (event: {
+            type: string;
+            text: string;
+            metric?: VoiceLatencyMetric;
+          }) => {
+            if (responseClosed) {
+              return;
+            }
 
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n");
+            try {
+              controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+            } catch (error) {
+              if (isControllerClosedError(error)) {
+                responseClosed = true;
+                return;
+              }
 
-            for (const line of lines) {
-              const trimmedLine = line.trim();
-              if (!trimmedLine) continue;
+              throw error;
+            }
+          };
 
-              try {
-                const parsed = JSON.parse(trimmedLine) as {
-                  message?: { content?: string };
-                  error?: string;
-                };
+          const emitLatencyMetric = (
+            key: string,
+            milliseconds: number,
+            detail?: string
+          ) => {
+            const metric: VoiceLatencyMetric = {
+              key,
+              milliseconds: Math.round(milliseconds * 100) / 100,
+              sinceStartMilliseconds:
+                Math.round((performance.now() - routeStartedAt) * 100) / 100,
+              detail,
+            };
+            emitEvent({ type: "latency", text: key, metric });
+          };
 
-                if (parsed.error) {
-                  console.error("Ollama stream error:", parsed.error);
-                  continue;
-                }
+          const emitFirstTextMetricIfNeeded = (detail: string) => {
+            if (firstTextMetricEmitted) {
+              return;
+            }
+            firstTextMetricEmitted = true;
+            emitLatencyMetric(
+              "server_first_text_ms",
+              performance.now() - routeStartedAt,
+              detail
+            );
+          };
 
-                const text = parsed.message?.content || "";
-                if (text) {
-                  fullContent += text;
-                  try {
-                    controller.enqueue(encoder.encode(text));
-                  } catch {
-                    responseClosed = true;
-                    await reader.cancel();
-                    break;
+          const emitSpeechBoundaries = (text: string, flush = false) => {
+            speechRemainder += text;
+            const { segments, remainder } = splitSpeakableSegments(
+              speechRemainder,
+              flush
+            );
+            speechRemainder = remainder;
+
+            for (const segment of segments) {
+              emitEvent({ type: "speech_boundary", text: segment });
+            }
+          };
+
+          const emitFullText = (text: string) => {
+            if (!text.trim()) {
+              return;
+            }
+
+            emitFirstTextMetricIfNeeded("deterministic");
+            fullContent = text;
+            emitEvent({ type: "text", text });
+            emitSpeechBoundaries(text, true);
+          };
+
+          try {
+            emitLatencyMetric(
+              "server_auth_ms",
+              authCompletedAt - authStartedAt
+            );
+            emitLatencyMetric(
+              "server_context_ms",
+              contextCompletedAt - contextStartedAt
+            );
+            emitLatencyMetric(
+              "server_prepare_ms",
+              prepareCompletedAt - prepareStartedAt
+            );
+            emitLatencyMetric(
+              "server_prework_ms",
+              prepareCompletedAt - routeStartedAt
+            );
+
+            if (preparedTurn.plan.preActionText) {
+              emitEvent({ type: "status", text: preparedTurn.plan.preActionText });
+            }
+
+            if (preparedTurn.plan.statusText) {
+              emitEvent({ type: "status", text: preparedTurn.plan.statusText });
+            }
+
+            for (const entry of buildToolActivityFeedEntries(preparedTurn.toolResults)) {
+              emitEvent({ type: "activity", text: entry });
+            }
+
+            const deterministicResponse =
+              preparedTurn.voiceDirectToolResponse || preparedTurn.directToolResponse;
+
+            if (deterministicResponse) {
+              emitFullText(deterministicResponse);
+            } else {
+              emitEvent({
+                type: "status",
+                text:
+                  preparedTurn.toolResults.length > 0
+                    ? "Pulling it together"
+                    : "Thinking",
+              });
+
+              const stream = await chat(preparedTurn.fullMessages, {
+                stream: true,
+                ...voiceChatOptionsForTurn(preparedTurn),
+              });
+              const modelStartedAt = performance.now();
+
+              if (!(stream instanceof ReadableStream)) {
+                emitFullText("I'm unavailable right now.");
+              } else {
+                const reader = stream.getReader();
+
+                try {
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done || responseClosed) {
+                      break;
+                    }
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    if (!chunk) {
+                      continue;
+                    }
+
+                    if (!streamedAssistantContent) {
+                      emitLatencyMetric(
+                        "server_model_first_chunk_ms",
+                        performance.now() - modelStartedAt
+                      );
+                      emitFirstTextMetricIfNeeded("model");
+                    }
+                    streamedAssistantContent = true;
+                    fullContent += chunk;
+                    emitEvent({ type: "text", text: chunk });
+                    emitSpeechBoundaries(chunk, false);
                   }
+                } finally {
+                  try {
+                    await reader.cancel();
+                  } catch {}
                 }
-              } catch {
-                // Skip malformed JSON lines
               }
             }
-          }
-        } catch (error) {
-          if (!responseClosed) {
-            console.error("Voice stream error:", error);
-          }
-        } finally {
-          if (fullContent) {
-            // Save to shared history and extract memories in background
-            await saveChatMessage("assistant", fullContent);
-            extractAndStoreMemories([
-              { role: "user", content: trimmed },
-              { role: "assistant", content: fullContent },
-            ]).catch(() => {});
-          }
+          } catch (error) {
+            console.error("Nicole voice stream error:", error);
 
-          if (!responseClosed) {
-            try { controller.close(); } catch {}
-          }
-        }
-      },
-      async cancel() {
-        responseClosed = true;
-        try { await reader.cancel(); } catch {}
-      },
-    });
+            if (!fullContent && !responseClosed) {
+              const fallback = "I'm unavailable right now.";
+              emitEvent({ type: "error", text: fallback });
+              emitFullText(fallback);
+            }
+          } finally {
+            if (speechRemainder.trim()) {
+              emitSpeechBoundaries("", true);
+            }
 
-    return new Response(responseStream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
-    });
+            if (fullContent) {
+              const assistantRecord = await saveChatMessage("assistant", fullContent);
+              await syncActiveTopicFromTurn({
+                scopeKey,
+                message,
+                assistantMessageId: assistantRecord?.id,
+                assistantContent: fullContent,
+                toolResults: preparedTurn.toolResults,
+                workspaceContext,
+                sourceContext: preparedTurn.sourceContext,
+                priorActiveTopic: preparedTurn.activeTopic,
+              });
+
+              if (assistantRecord?.id && userRecord?.id) {
+                await saveTurnLink({
+                  messageId: assistantRecord.id,
+                  linkedMessageId: userRecord.id,
+                  scopeKey,
+                  linkType: "responds_to",
+                  topicKind: preparedTurn.activeTopic?.kind,
+                });
+              }
+
+              const lastExchange: ChatMessage[] = [
+                { role: "user", content: message },
+                { role: "assistant", content: fullContent },
+              ];
+              extractAndStoreMemories(lastExchange).catch(() => {});
+              summarizeOldConversations().catch(() => {});
+            }
+
+            await markVoiceTurnCompleted(preparedTurn.plan.voiceTurnId);
+            emitLatencyMetric(
+              "server_total_ms",
+              performance.now() - routeStartedAt,
+              streamedAssistantContent ? "streamed" : "deterministic"
+            );
+
+            if (!responseClosed) {
+              emitEvent({ type: "done", text: preparedTurn.plan.voiceTurnId });
+              try {
+                controller.close();
+              } catch {}
+            }
+          }
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      }
+    );
   } catch (error) {
-    console.error("Voice endpoint error:", error);
+    if (error instanceof TrustedDeviceAuthError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+
+    console.error("Nicole voice error:", error);
     return NextResponse.json(
-      { error: "Voice is unavailable right now." },
+      { error: "I'm unavailable right now." },
       { status: 503 }
     );
   }
+}
+
+function splitSpeakableSegments(
+  buffer: string,
+  flush: boolean
+): { segments: string[]; remainder: string } {
+  const segments: string[] = [];
+  let current = "";
+  const scalars = Array.from(buffer);
+
+  for (let index = 0; index < scalars.length; index += 1) {
+    const scalar = scalars[index] || "";
+    current += scalar;
+
+    const next = scalars[index + 1] || "";
+    const boundary =
+      /[.!?]/.test(scalar) ||
+      (/[,\n;:]/.test(scalar) && current.trim().length >= 24) ||
+      (current.trim().length >= 90 && /\s/.test(scalar));
+    const nextAllowsBreak = next.length === 0 || /\s/.test(next);
+
+    if (boundary && nextAllowsBreak) {
+      const segment = current.trim();
+      if (segment.length > 0) {
+        segments.push(segment);
+      }
+      current = "";
+    }
+  }
+
+  if (flush && current.trim()) {
+    segments.push(current.trim());
+    current = "";
+  }
+
+  return {
+    segments,
+    remainder: current,
+  };
+}
+
+function isControllerClosedError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { code?: string; message?: string };
+  return (
+    candidate.code === "ERR_INVALID_STATE" ||
+    candidate.message?.includes("Controller is already closed") === true
+  );
 }

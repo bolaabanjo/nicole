@@ -9,12 +9,6 @@ export function Navbar() {
           <a href="/library" className="transition-colors hover:text-foreground">
             Library
           </a>
-          <a
-            href="/integrations"
-            className="transition-colors hover:text-foreground"
-          >
-            Integrations
-          </a>
         </div>
       </div>
     </nav>

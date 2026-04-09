@@ -164,6 +164,83 @@ export const conversationSummaries = pgTable("conversation_summaries", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Conversation state: short-lived operational thread anchors for follow-up turns
+export const conversationState = pgTable("conversation_state", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Turn artifacts: grounded evidence Nicole used in a turn, grouped by active topic
+export const turnArtifacts = pgTable("turn_artifacts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  chatMessageId: uuid("chat_message_id").references(() => chatMessages.id, {
+    onDelete: "set null",
+  }),
+  scopeKey: text("scope_key").notNull().default("global"),
+  topicKind: text("topic_kind").notNull(),
+  topicLabel: text("topic_label"),
+  artifactKind: text("artifact_kind").notNull(), // 'tool_result' | 'vision' | 'source' | 'workspace' | 'assistant_answer'
+  summary: text("summary").notNull(),
+  payload: jsonb("payload"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const turnLinks = pgTable(
+  "turn_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    messageId: uuid("message_id")
+      .references(() => chatMessages.id, { onDelete: "cascade" })
+      .notNull(),
+    linkedMessageId: uuid("linked_message_id")
+      .references(() => chatMessages.id, { onDelete: "cascade" })
+      .notNull(),
+    scopeKey: text("scope_key").notNull().default("global"),
+    linkType: text("link_type").notNull(), // 'follow_up_to' | 'responds_to'
+    topicKind: text("topic_kind"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => [
+    index("turn_links_message_idx").on(table.messageId),
+    index("turn_links_linked_message_idx").on(table.linkedMessageId),
+    index("turn_links_scope_idx").on(table.scopeKey),
+  ]
+);
+
+// Voice turns: speculative and final voice-runtime state scoped by surface/session
+export const voiceTurns = pgTable(
+  "voice_turns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKey: text("scope_key").notNull().default("web:voice"),
+    surface: text("surface").notNull().default("web"),
+    sessionId: text("session_id").notNull().default("voice"),
+    transcript: text("transcript").notNull(),
+    intentClass: text("intent_class").notNull().default("conversational"),
+    topicKind: text("topic_kind"),
+    ackPolicy: text("ack_policy").notNull().default("none"),
+    deterministicMode: text("deterministic_mode").notNull().default("false"),
+    preActionText: text("pre_action_text"),
+    statusText: text("status_text"),
+    plannedToolCalls: jsonb("planned_tool_calls"),
+    groundedArtifactIds: jsonb("grounded_artifact_ids"),
+    replyToTurnId: uuid("reply_to_turn_id"),
+    interruptedByTurnId: uuid("interrupted_by_turn_id"),
+    preparedAt: timestamp("prepared_at").defaultNow(),
+    consumedAt: timestamp("consumed_at"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => [
+    index("voice_turns_scope_idx").on(table.scopeKey),
+    index("voice_turns_surface_idx").on(table.surface),
+    index("voice_turns_session_idx").on(table.sessionId),
+    index("voice_turns_prepared_idx").on(table.preparedAt),
+  ]
+);
+
 // Tool invocations: audit trail for Nicole's tool system
 export const toolInvocations = pgTable("tool_invocations", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -243,6 +320,32 @@ export const reminders = pgTable("reminders", {
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
+
+// Health metrics: daily health snapshots pushed from iPhone
+export const healthMetrics = pgTable(
+  "health_metrics",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    date: text("date").notNull(), // YYYY-MM-DD
+    sleepHours: integer("sleep_hours"),
+    sleepMinutes: integer("sleep_minutes"),
+    sleepQuality: text("sleep_quality"), // 'poor' | 'fair' | 'good' | 'excellent'
+    steps: integer("steps"),
+    activeMinutes: integer("active_minutes"),
+    restingHeartRate: integer("resting_heart_rate"),
+    heartRateAvg: integer("heart_rate_avg"),
+    heartRateMax: integer("heart_rate_max"),
+    caloriesBurned: integer("calories_burned"),
+    waterMl: integer("water_ml"),
+    weight: integer("weight"), // grams (e.g. 75000 = 75kg)
+    mood: text("mood"), // 'great' | 'good' | 'okay' | 'low' | 'bad'
+    notes: text("notes"),
+    rawData: jsonb("raw_data"), // full HealthKit dump for anything we don't have a column for
+    pushedAt: timestamp("pushed_at").defaultNow(),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => [uniqueIndex("health_metrics_date_unique").on(table.date)]
+);
 
 // Notes / writing drafts
 export const notes = pgTable("notes", {
