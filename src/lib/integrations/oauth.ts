@@ -101,7 +101,8 @@ export function buildAuthorizationUrl(
   const redirectUri = getProviderCallbackUrl(providerId, origin);
 
   switch (providerId) {
-    case "google_calendar": {
+    case "google_calendar":
+    case "gmail": {
       const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       url.searchParams.set("client_id", process.env.GOOGLE_CLIENT_ID!.trim());
       url.searchParams.set("redirect_uri", redirectUri);
@@ -150,6 +151,17 @@ export async function handleOAuthCallback(
       });
       return;
     }
+    case "gmail": {
+      const token = await exchangeGoogleCode(code, redirectUri);
+      const profile = await fetchGoogleProfile(token.access_token);
+      await upsertIntegrationAccount(providerId, token, {
+        displayName: profile.name || profile.email || "Gmail",
+        email: profile.email || null,
+        externalAccountId: profile.sub || null,
+        metadata: profile,
+      });
+      return;
+    }
     case "zoho_mail": {
       const token = await exchangeZohoCode(code, redirectUri);
       const profile = await fetchZohoProfile(token.access_token);
@@ -185,7 +197,7 @@ export async function getValidAccessToken(providerId: IntegrationProviderId) {
   }
 
   const refreshed =
-    providerId === "google_calendar"
+    providerId === "google_calendar" || providerId === "gmail"
       ? await refreshGoogleToken(account.refreshToken)
       : providerId === "zoho_mail"
         ? await refreshZohoToken(account.refreshToken)

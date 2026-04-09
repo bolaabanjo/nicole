@@ -1,5 +1,6 @@
 export type IntegrationProviderId =
   | "google_calendar"
+  | "gmail"
   | "zoho_mail"
   | "apple_calendar"
   | "apple_reminders";
@@ -29,14 +30,38 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderDefinition[] = [
     capabilities: ["calendar_read", "calendar_create_event"],
   },
   {
+    id: "gmail",
+    kind: "email",
+    title: "Gmail",
+    description:
+      "Connect Gmail so Nicole can search and send email from this Mac.",
+    connectionType: "oauth",
+    status: "ready",
+    capabilities: [
+      "email_search",
+      "email_read",
+      "email_thread_read",
+      "email_reply_draft",
+      "email_reply_send",
+      "email_send",
+    ],
+  },
+  {
     id: "zoho_mail",
     kind: "email",
     title: "Zoho Mail",
     description:
-      "Connect Zoho Mail so Nicole can eventually read, search, and send email from Banjo.",
+      "Connect Zoho Mail so Nicole can search and send email from this Mac.",
     connectionType: "oauth",
     status: "ready",
-    capabilities: ["email_search", "email_send"],
+    capabilities: [
+      "email_search",
+      "email_read",
+      "email_thread_read",
+      "email_reply_draft",
+      "email_reply_send",
+      "email_send",
+    ],
   },
   {
     id: "apple_calendar",
@@ -69,6 +94,7 @@ export function getIntegrationProvider(
 export function isProviderConfigured(id: IntegrationProviderId): boolean {
   switch (id) {
     case "google_calendar":
+    case "gmail":
       return Boolean(
         process.env.GOOGLE_CLIENT_ID?.trim() &&
           process.env.GOOGLE_CLIENT_SECRET?.trim()
@@ -92,6 +118,14 @@ export function getProviderScopes(id: IntegrationProviderId): string[] {
         "email",
         "profile",
         "https://www.googleapis.com/auth/calendar",
+      ];
+    case "gmail":
+      return [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
       ];
     case "zoho_mail":
       return [

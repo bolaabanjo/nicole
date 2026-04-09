@@ -117,15 +117,15 @@ export default function IntegrationsPage() {
         <div className="space-y-1">
           <h1 className="text-xl font-semibold tracking-tight">Integrations</h1>
           <p className="text-sm text-[var(--muted)]">
-            Connect Nicole to the services you actually use. Banjo stays the
-            canonical brain; these providers just give her real-world reach.
+            Fallback admin surface for Nicole's integrations. The normal path is
+            to ask Nicole directly to connect or disconnect a service.
           </p>
         </div>
 
         <div className="rounded-2xl border border-[var(--border)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-xs text-[var(--muted)]">
-          OAuth providers need app credentials in Banjo&apos;s `.env.local`.
-          Native Mac integrations like Apple Calendar will come through
-          `nicole-macos`, not this page.
+          OAuth providers still need local app credentials in Nicole&apos;s
+          `.env.local`. Native Mac integrations like Apple Calendar will come
+          through `nicole-macos`, not this page.
         </div>
 
         {feedback && (
