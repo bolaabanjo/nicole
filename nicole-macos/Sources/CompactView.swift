@@ -13,6 +13,7 @@ struct CompactView: View {
   @ObservedObject var viewModel: ChatViewModel
   @ObservedObject var panelState: CompactPanelState
   @ObservedObject var voiceController: NicoleVoiceController
+  @ObservedObject var captureController: CompactScreenCaptureController
 
   @FocusState private var isInputFocused: Bool
   @State private var draft = ""
@@ -163,6 +164,8 @@ struct CompactView: View {
       .padding(.horizontal, !panelState.exchanges.isEmpty ? 12 : 0)
       .padding(.bottom, !panelState.exchanges.isEmpty ? 12 : 0)
 
+      compactStatusRow
+
       if let voiceStatusText = voiceController.inlineStatusText {
         HStack {
           Text(voiceStatusText)
@@ -198,6 +201,30 @@ struct CompactView: View {
     .animation(.spring(response: 0.3, dampingFraction: 0.8), value: !panelState.exchanges.isEmpty)
     .animation(.spring(response: 0.3, dampingFraction: 0.8), value: viewModel.messages.last?.id)
     .animation(.spring(response: 0.3, dampingFraction: 0.8), value: viewModel.isSending)
+  }
+
+  @ViewBuilder
+  private var compactStatusRow: some View {
+    if let captureStatusText = captureController.inlineStatusText {
+      HStack(spacing: 10) {
+        Text(captureStatusText)
+          .font(.system(size: 11, weight: .medium))
+          .foregroundStyle(Color.white.opacity(0.5))
+
+        Spacer(minLength: 0)
+
+        if captureController.showsOpenSystemSettingsButton {
+          Button("Open System Settings") {
+            captureController.openSystemSettings()
+          }
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(Color.white.opacity(0.72))
+          .buttonStyle(.plain)
+        }
+      }
+      .padding(.horizontal, 18)
+      .padding(.bottom, 12)
+    }
   }
 
 

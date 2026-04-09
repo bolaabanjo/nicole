@@ -12,6 +12,7 @@ final class CompactWindowManager: ObservableObject {
   private var anchorTopY: CGFloat?
   private weak var currentScreen: NSScreen?
   private weak var voiceController: NicoleVoiceController?
+  private let captureController = CompactScreenCaptureController.shared
 
   private init() {}
 
@@ -68,7 +69,8 @@ final class CompactWindowManager: ObservableObject {
         settings: settings,
         viewModel: viewModel,
         panelState: panelState,
-        voiceController: voiceController
+        voiceController: voiceController,
+        captureController: captureController
       )
       let hostingView = NSHostingView(rootView: rootView)
       hostingView.sizingOptions = [.intrinsicContentSize]
@@ -99,12 +101,17 @@ final class CompactWindowManager: ObservableObject {
 
     panel.orderFrontRegardless()
     panel.makeKeyAndOrderFront(nil)
+    captureController.startIfNeeded(for: targetScreen)
+    Task {
+      await LocalVisionAnalyzer.shared.warmIfNeeded()
+    }
   }
 
   func hidePanel() {
     guard let panel else { return }
 
     voiceController?.stopListeningIfActive(on: .compact)
+    captureController.stop()
     panel.orderOut(nil)
     panelState.markHidden()
   }

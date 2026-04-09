@@ -422,7 +422,8 @@ private extension ContentView {
       let didComplete = await viewModel.send(
         baseURLString: settings.baseURLString,
         settings: settings,
-        attachmentURL: selectedAttachment?.url
+        attachmentURL: selectedAttachment?.url,
+        sessionScope: .expanded
       )
 
       if didComplete {

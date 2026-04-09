@@ -18,7 +18,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSApp.setActivationPolicy(.regular)
     NSApp.activate(ignoringOtherApps: true)
     installGlobalHotKey()
-    ScreenCapturePermissionManager.requestOnLaunch()
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -136,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSApp.activate(ignoringOtherApps: true)
 
     voiceController.stopSpeaking()
+    VoiceSessionManager.shared.markReplyCompleted(on: .ambient)
     voiceController.stopListeningIfActive(on: .expanded)
     voiceController.stopListeningIfActive(on: .compact)
 
@@ -160,7 +160,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
     }
 
-    voiceController.startAmbientCapture { [weak self] transcript in
+    VoiceSessionManager.shared.beginCapture(on: .ambient)
+    voiceController.startAmbientCapture(
+      onProgressiveTranscript: { partial in
+        VoiceSessionManager.shared.updateProgressiveTranscript(
+          partial,
+          on: .ambient,
+          baseURLString: settings.baseURLString
+        )
+      },
+      onFinalTranscript: { [weak self] transcript in
       guard let self else { return }
 
       Task { @MainActor in
@@ -177,7 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           voiceController: voiceController
         )
       }
-    }
+    })
   }
 
   // MARK: - Voice status phrases (spoken while tools execute)
@@ -239,9 +248,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       ].randomElement()!
     }
 
+    // Weather
+    if lower.contains("weather") || lower.contains("temperature") || lower.contains("forecast") ||
+       lower.contains("rain") || lower.contains("umbrella") {
+      return [
+        "Let me check the weather.",
+        "Checking the weather now.",
+        "One sec, pulling up the forecast.",
+      ].randomElement()!
+    }
+
     // Current info keywords
     if lower.contains("latest") || lower.contains("news") || lower.contains("today") ||
-       lower.contains("weather") || lower.contains("price") || lower.contains("score") ||
+       lower.contains("price") || lower.contains("score") ||
        lower.contains("update") || lower.contains("recent") {
       return [
         "Let me check on that.",
@@ -282,38 +301,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     viewModel: ChatViewModel,
     voiceController: NicoleVoiceController
   ) async {
-    // Check if this command will trigger tools — if so, speak a status phrase
-    // while the server processes (runs in parallel with the server request)
-    if let statusPhrase = Self.voiceStatusPhrase(for: command) {
-      // Speak the status phrase and wait for it to finish before starting streaming TTS
-      await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        KokoroSpeaker.shared.speak(text: statusPhrase) {
-          continuation.resume()
-        }
-      }
-    }
+    let preparedTurn = await VoiceSessionManager.shared.finalizePreparation(
+      transcript: command,
+      on: .ambient,
+      baseURLString: settings.baseURLString
+    )
 
-    // Start streaming TTS — Nicole will begin speaking as soon as the first
-    // sentence arrives, while the rest of the response is still generating.
-    voiceController.beginStreamingTTS { [weak self] in
+    voiceController.beginStreamingTTS(on: .ambient) { [weak self] in
       Task { @MainActor in
-        // TTS finished naturally — stop interrupt monitoring and start next turn
+        VoiceSessionManager.shared.markReplyCompleted(on: .ambient)
         voiceController.stopInterruptMonitoring()
         await self?.startConversationTurn()
       }
     }
+    VoiceSessionManager.shared.markReplyStarted(
+      on: .ambient,
+      voiceTurnId: preparedTurn?.voiceTurnId
+    )
 
-    // Monitor the mic while Nicole speaks — if the user talks over her, interrupt
     voiceController.startInterruptMonitoring { [weak self] capturedAudio in
       guard let self else { return }
 
       Task { @MainActor in
-        // User interrupted — stop Nicole mid-sentence
+        _ = capturedAudio
+        _ = VoiceSessionManager.shared.markReplyInterrupted(on: .ambient)
         voiceController.cancelStreamingTTS()
         KokoroSpeaker.shared.stopSpeaking()
 
-        // Now capture the rest of what the user is saying
-        voiceController.startAmbientCapture { [weak self] transcript in
+        VoiceSessionManager.shared.beginCapture(on: .ambient)
+        voiceController.startAmbientCapture(
+          onProgressiveTranscript: { partial in
+            VoiceSessionManager.shared.updateProgressiveTranscript(
+              partial,
+              on: .ambient,
+              baseURLString: settings.baseURLString
+            )
+          },
+          onFinalTranscript: { [weak self] transcript in
           guard let self else { return }
 
           Task { @MainActor in
@@ -330,28 +354,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               voiceController: voiceController
             )
           }
-        }
+        })
       }
     }
 
     let response: NicoleMessage?
 
     if Self.isVisionRequest(command) {
-      // Vision request — capture screen and send to vision model
       response = await viewModel.sendVisionMessage(
         question: command,
         baseURLString: settings.baseURLString,
-        settings: settings
+        settings: settings,
+        voiceSurface: .ambient,
+        preparedTurn: preparedTurn
       )
     } else {
       response = await viewModel.sendVoiceMessage(
         command,
         baseURLString: settings.baseURLString,
-        settings: settings
+        settings: settings,
+        surface: .ambient,
+        preparedTurn: preparedTurn
       )
     }
 
     if response == nil {
+      VoiceSessionManager.shared.markReplyCompleted(on: .ambient)
       voiceController.stopInterruptMonitoring()
       voiceController.cancelStreamingTTS()
       await resumeWakeWordListeningIfNeeded()
@@ -382,7 +410,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       return
     }
 
-    voiceController.startAmbientCapture { [weak self] transcript in
+    VoiceSessionManager.shared.beginCapture(on: .ambient)
+    voiceController.startAmbientCapture(
+      onProgressiveTranscript: { partial in
+        VoiceSessionManager.shared.updateProgressiveTranscript(
+          partial,
+          on: .ambient,
+          baseURLString: settings.baseURLString
+        )
+      },
+      onFinalTranscript: { [weak self] transcript in
       guard let self else { return }
 
       Task { @MainActor in
@@ -414,7 +451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           voiceController: voiceController
         )
       }
-    }
+    })
   }
 
   private func resumeWakeWordListeningIfNeeded() async {

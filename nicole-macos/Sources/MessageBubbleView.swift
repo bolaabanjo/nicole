@@ -17,7 +17,7 @@ struct MessageBubbleView: View {
       }
 
       VStack(alignment: .leading, spacing: 8) {
-        if message.role == .assistant && (message.thoughtContent != nil || message.isStreaming) {
+        if message.role == .assistant && shouldShowThoughtView {
             ThoughtView(
                 thought: message.thoughtContent ?? "",
                 duration: message.thoughtDuration,
@@ -25,6 +25,11 @@ struct MessageBubbleView: View {
                 isOpen: $isThoughtOpen
             )
             .padding(.bottom, 4)
+        }
+
+        if message.role == .assistant && hasActivityFeed {
+          AssistantActivityFeedView(message: message)
+            .padding(.bottom, message.content.isEmpty ? 4 : 8)
         }
 
         if message.role == .user {
@@ -110,6 +115,66 @@ struct MessageBubbleView: View {
     .padding(.horizontal, 16)
     .padding(.vertical, 4)
     .frame(maxWidth: 720)
+  }
+
+  private var hasActivityFeed: Bool {
+    message.preActionText?.isEmpty == false ||
+      message.liveStatusText?.isEmpty == false ||
+      !message.activityItems.isEmpty
+  }
+
+  private var shouldShowThoughtView: Bool {
+    (message.thoughtContent != nil || message.isStreaming) && !hasActivityFeed
+  }
+}
+
+private struct AssistantActivityFeedView: View {
+  let message: NicoleMessage
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      if let preActionText = message.preActionText, !preActionText.isEmpty {
+        Text(preActionText)
+          .font(.system(size: 15, weight: .regular))
+          .foregroundStyle(Color.white.opacity(0.9))
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
+      if let liveStatusText = message.liveStatusText, !liveStatusText.isEmpty {
+        HStack(spacing: 8) {
+          Circle()
+            .fill(Color.white.opacity(0.5))
+            .frame(width: 6, height: 6)
+
+          Text(liveStatusText)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.52))
+        }
+      }
+
+      if !message.activityItems.isEmpty {
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(message.activityItems) { item in
+            HStack(alignment: .center, spacing: 8) {
+              Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.62))
+
+              Text(item.text)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+            )
+          }
+        }
+      }
+    }
   }
 }
 
