@@ -501,6 +501,10 @@ export const TOOL_CATALOG: ToolDefinition[] = [
       properties: {
         query: { type: "string", description: "Email search query." },
         limit: { type: "number", description: "Maximum number of matching emails to return." },
+        provider: {
+          type: "string",
+          description: "Optional provider hint such as 'gmail' or 'zoho mail'.",
+        },
       },
       required: ["query"],
     },
@@ -527,6 +531,223 @@ export const TOOL_CATALOG: ToolDefinition[] = [
       required: ["to", "subject", "body"],
     },
     outputDescription: "Returns send status and message id.",
+  }),
+  defineTool({
+    name: "email_read",
+    category: "communication",
+    title: "Read email",
+    description: "Loads the full content of a specific email.",
+    whenToUse: "Use when the user asks Nicole to open, read, or inspect a specific email from recent results.",
+    sideEffectLevel: "read",
+    requiresConfirmation: false,
+    availability: "hybrid",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selection: {
+          type: "string",
+          description: "Optional reference like 'first', 'second', 'last', 'that', or 'it'.",
+        },
+        messageId: {
+          type: "string",
+          description: "Optional explicit message id if already known.",
+        },
+        provider: {
+          type: "string",
+          description: "Optional provider hint such as 'gmail' or 'zoho mail'.",
+        },
+        sender: {
+          type: "string",
+          description: "Optional sender hint to match a recent result.",
+        },
+      },
+    },
+    outputDescription: "Returns the full email metadata and visible body content.",
+  }),
+  defineTool({
+    name: "email_thread_read",
+    category: "communication",
+    title: "Read email thread",
+    description: "Loads a full email conversation thread when the provider supports it.",
+    whenToUse: "Use when the user explicitly asks to open the thread or full conversation for a recent email.",
+    sideEffectLevel: "read",
+    requiresConfirmation: false,
+    availability: "hybrid",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selection: {
+          type: "string",
+          description: "Optional reference like 'first', 'second', 'last', 'that', or 'it'.",
+        },
+        messageId: {
+          type: "string",
+          description: "Optional explicit message id if already known.",
+        },
+        provider: {
+          type: "string",
+          description: "Optional provider hint such as 'gmail' or 'zoho mail'.",
+        },
+        sender: {
+          type: "string",
+          description: "Optional sender hint to match a recent result.",
+        },
+      },
+    },
+    outputDescription: "Returns thread messages with bodies and participants.",
+  }),
+  defineTool({
+    name: "email_reply_draft",
+    category: "communication",
+    title: "Draft email reply",
+    description: "Drafts a reply to a recent email.",
+    whenToUse: "Use when the user asks Nicole to draft or write a reply to a recent email.",
+    sideEffectLevel: "read",
+    requiresConfirmation: false,
+    availability: "hybrid",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selection: {
+          type: "string",
+          description: "Optional reference like 'first', 'second', 'last', 'that', or 'it'.",
+        },
+        messageId: {
+          type: "string",
+          description: "Optional explicit message id if already known.",
+        },
+        provider: {
+          type: "string",
+          description: "Optional provider hint such as 'gmail' or 'zoho mail'.",
+        },
+        sender: {
+          type: "string",
+          description: "Optional sender hint to match a recent result.",
+        },
+        instructions: {
+          type: "string",
+          description: "What the reply should say or optimize for.",
+        },
+      },
+    },
+    outputDescription: "Returns a drafted reply with to, subject, and body.",
+  }),
+  defineTool({
+    name: "email_reply_send",
+    category: "communication",
+    title: "Send email reply",
+    description: "Sends a reply to a recent email.",
+    whenToUse: "Use only when the user explicitly confirms that Nicole should send the drafted reply.",
+    sideEffectLevel: "actuate",
+    requiresConfirmation: true,
+    availability: "hybrid",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selection: {
+          type: "string",
+          description: "Optional reference like 'first', 'second', 'last', 'that', or 'it'.",
+        },
+        messageId: {
+          type: "string",
+          description: "Optional explicit message id if already known.",
+        },
+        provider: {
+          type: "string",
+          description: "Optional provider hint such as 'gmail' or 'zoho mail'.",
+        },
+        sender: {
+          type: "string",
+          description: "Optional sender hint to match a recent result.",
+        },
+        subject: {
+          type: "string",
+          description: "Optional override for the reply subject.",
+        },
+        body: {
+          type: "string",
+          description: "Optional explicit reply body. If omitted, Nicole uses the latest drafted reply.",
+        },
+        cc: {
+          type: "string",
+          description: "Optional CC email address.",
+        },
+      },
+    },
+    outputDescription: "Returns send status and reply message id.",
+  }),
+  defineTool({
+    name: "integration_status",
+    category: "system",
+    title: "Check integration status",
+    description: "Checks whether services like Gmail, Google Calendar, or Zoho Mail are connected.",
+    whenToUse: "Use when Roy asks what is connected, whether a provider is connected, or which integrations Nicole can use right now.",
+    sideEffectLevel: "read",
+    requiresConfirmation: false,
+    availability: "local",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          description: "Optional provider name such as 'gmail', 'google calendar', or 'zoho mail'.",
+        },
+      },
+    },
+    outputDescription: "Returns one provider status or a full integration status snapshot.",
+  }),
+  defineTool({
+    name: "integration_connect",
+    category: "system",
+    title: "Connect integration",
+    description: "Starts an official auth flow for a supported integration.",
+    whenToUse: "Use when Roy explicitly asks Nicole to connect Gmail, Google Calendar, Zoho Mail, or another supported service.",
+    sideEffectLevel: "actuate",
+    requiresConfirmation: false,
+    availability: "local",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          description: "Provider name such as 'gmail', 'google calendar', or 'zoho mail'.",
+        },
+        clientSurface: {
+          type: "string",
+          description: "Optional client surface such as 'macos', 'ios', or 'web'.",
+        },
+      },
+      required: ["provider"],
+    },
+    outputDescription: "Returns the auth launch status, provider state, and next steps.",
+  }),
+  defineTool({
+    name: "integration_disconnect",
+    category: "system",
+    title: "Disconnect integration",
+    description: "Disconnects a supported integration from Nicole.",
+    whenToUse: "Use when Roy explicitly asks Nicole to disconnect a service like Gmail, Google Calendar, or Zoho Mail.",
+    sideEffectLevel: "write",
+    requiresConfirmation: false,
+    availability: "local",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          description: "Provider name such as 'gmail', 'google calendar', or 'zoho mail'.",
+        },
+      },
+      required: ["provider"],
+    },
+    outputDescription: "Returns the disconnection result and updated provider state.",
   }),
   defineTool({
     name: "message_send",
@@ -736,24 +957,49 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     outputDescription: "Returns playback state.",
   }),
   defineTool({
+    name: "weather_get",
+    category: "productivity",
+    title: "Get weather",
+    description: "Gets current weather conditions and forecast for a location.",
+    whenToUse: "Use when the user asks about weather, temperature, rain, or outdoor conditions.",
+    sideEffectLevel: "read",
+    requiresConfirmation: false,
+    availability: "hybrid",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        location: { type: "string", description: "City or location name. Defaults to London if not specified." },
+        forecastDays: { type: "number", description: "Number of forecast days (1-7). Defaults to 3." },
+      },
+    },
+    outputDescription: "Returns current conditions and daily forecast.",
+  }),
+  defineTool({
     name: "health_metric_read",
     category: "health",
     title: "Read health metrics",
-    description: "Reads future tracked health metrics or sensor summaries.",
-    whenToUse: "Use when the user asks Nicole about health trends or tracked data.",
+    description: "Reads health metrics — sleep, steps, heart rate, activity, mood.",
+    whenToUse: "Use when the user asks about sleep, steps, heart rate, health, fitness, or how they're doing physically.",
     sideEffectLevel: "read",
-    requiresConfirmation: true,
+    requiresConfirmation: false,
     availability: "hybrid",
-    status: "planned",
-    inputSchema: emptySchema,
-    outputDescription: "Returns health or sensor metrics.",
+    status: "ready",
+    inputSchema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "Optional date in YYYY-MM-DD format. Defaults to today." },
+        days: { type: "number", description: "Number of days of history to return. Defaults to 7." },
+      },
+    },
+    outputDescription: "Returns health summary with today's data, weekly averages, and trends.",
   }),
   defineTool({
     name: "workspace_read",
     category: "system",
     title: "Read workspace file",
     description: "Reads a file from Nicole's workspace at ~/.nicole/.",
-    whenToUse: "Use when Nicole needs to check her own identity, context, user profile, skills, or daily memory notes.",
+    whenToUse: "Use when Nicole needs to check her own machine-level files such as SOUL.md, AGENTS.md, USER.md, CONTEXT.md, MEMORY.md, skills, or daily memory notes.",
     sideEffectLevel: "read",
     requiresConfirmation: false,
     availability: "local",
@@ -761,7 +1007,7 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Relative path within ~/.nicole/, e.g. 'user.md', 'memory/2026-04-05.md', 'skills/voice/SKILL.md'." },
+        path: { type: "string", description: "Relative path within ~/.nicole/, e.g. 'USER.md', 'MEMORY.md', 'memory/2026-04-05.md', or 'skills/voice/SKILL.md'." },
       },
       required: ["path"],
     },
@@ -772,7 +1018,7 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     category: "system",
     title: "Write workspace file",
     description: "Writes a file to Nicole's workspace at ~/.nicole/. Nicole can update her own context, daily memory notes, and user profile.",
-    whenToUse: "Use when Nicole learns something worth persisting — update user.md, write daily notes to memory/YYYY-MM-DD.md, or update context.md.",
+    whenToUse: "Use when Nicole learns something worth persisting — update USER.md or MEMORY.md, write daily notes to memory/YYYY-MM-DD.md, or update CONTEXT.md.",
     sideEffectLevel: "write",
     requiresConfirmation: false,
     availability: "local",
@@ -780,7 +1026,7 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Relative path within ~/.nicole/, e.g. 'context.md', 'memory/2026-04-05.md', 'user.md'." },
+        path: { type: "string", description: "Relative path within ~/.nicole/, e.g. 'CONTEXT.md', 'MEMORY.md', 'memory/2026-04-05.md', or 'USER.md'." },
         content: { type: "string", description: "The full file content to write." },
       },
       required: ["path", "content"],

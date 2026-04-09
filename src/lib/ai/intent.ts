@@ -1,4 +1,5 @@
 import { ChatMessage } from "./types";
+import { looksLikeTopicFollowUp } from "./topic-routing";
 
 /**
  * Nicole's deterministic intent classifier.
@@ -14,6 +15,8 @@ export type IntentType =
   | "source_question"     // "in my notes", "that PDF" → source_search
   | "action_request"      // "remind me", "send email" → direct tool (already handled)
   | "workspace_question"  // "your files", "what do you know about me" → workspace tools
+  | "weather_question"    // "what's the weather" → weather_get
+  | "health_question"     // "how did I sleep" → health_metric_read
   | "casual"              // greetings, short responses → no tools
   | "ambiguous";          // everything else → auto-attach memory, let LLM respond
 
@@ -21,6 +24,7 @@ export interface IntentClassification {
   intent: IntentType;
   searchQuery?: string;       // For factual_question: what to search
   sourceQuery?: string;       // For source_question: what to look up
+  weatherLocation?: string;   // For weather_question: optional location
   shouldSearchMemory: boolean; // Whether to auto-attach memory context
   shouldSearchSources: boolean; // Whether to auto-attach source context
 }
@@ -106,14 +110,54 @@ const WORKSPACE_PATTERNS = [
 // ---------------------------------------------------------------------------
 
 const ACTION_PATTERNS = [
+  /\bconnect (?:my |to )?(?:google calendar|calendar|zoho|zoho mail|gmail|google mail|email)\b/i,
+  /\bdisconnect (?:my |from )?(?:google calendar|calendar|zoho|zoho mail|gmail|google mail|email)\b/i,
+  /\bwhat integrations\b/i,
+  /\bwhat'?s connected\b/i,
   /\bremind me to\b/i,
   /\bset a reminder\b/i,
   /\bcreate (?:a |an )?(?:reminder|event|note)\b/i,
   /\badd .* to (?:my )?calendar\b/i,
   /\bsend (?:an? )?email\b/i,
+  /\b(?:read|open|show) (?:the )?(?:email|mail|message|thread|conversation)\b/i,
+  /\bwhat(?:\s+else)?\s+did\s+.+\s+say\b/i,
+  /\btell me more about .+(?:email|mail|message)\b/i,
+  /\bwhat(?:'s| is| else is) in (?:that|this|the) (?:email|mail|message)\b/i,
+  /\bdraft (?:a )?reply\b/i,
+  /\bwrite (?:a )?reply\b/i,
+  /\bsend (?:that|the|this)?\s*reply\b/i,
   /\bgit status\b/i,
   /\brepo status\b/i,
   /\brun [`'"]/i,
+];
+
+// ---------------------------------------------------------------------------
+// Weather patterns → weather_get (direct tool, skip web search)
+// ---------------------------------------------------------------------------
+
+const WEATHER_PATTERNS: Array<{ pattern: RegExp; locationGroup?: number }> = [
+  { pattern: /^(?:what(?:'s| is) the )?weather\s*(?:in|at|for|near)?\s*(.+?)(?:\?|\.)?$/i, locationGroup: 1 },
+  { pattern: /^(?:how(?:'s| is) the )?weather\s*(?:today|tomorrow|this week|right now)?(?:\?|\.)?$/i },
+  { pattern: /^(?:what(?:'s| is) (?:it |the )?(?:temperature|temp)\s*(?:in|at|for)?\s*(.+?)?)(?:\?|\.)?$/i, locationGroup: 1 },
+  { pattern: /^(?:is it (?:going to |gonna )?(?:rain|snow|storm|hot|cold|warm|freezing))\s*(?:today|tomorrow|this week)?(?:\s+in\s+(.+?))?(?:\?|\.)?$/i, locationGroup: 1 },
+  { pattern: /^(?:do i need (?:an? )?(?:umbrella|jacket|coat|sunscreen))\s*(?:today|tomorrow)?(?:\?|\.)?$/i },
+  { pattern: /^(?:will it (?:rain|snow|storm|be (?:hot|cold|warm)))\s*(?:today|tomorrow|this week)?(?:\s+in\s+(.+?))?(?:\?|\.)?$/i, locationGroup: 1 },
+  { pattern: /\b(?:weather forecast|weather report)\b(?:\s+(?:for|in)\s+(.+?))?(?:\?|\.)?$/i, locationGroup: 1 },
+];
+
+// ---------------------------------------------------------------------------
+// Health patterns → health_metric_read
+// ---------------------------------------------------------------------------
+
+const HEALTH_PATTERNS = [
+  /\b(?:how did i|how was my|how's my|how much did i)\s+(?:sleep|rest)\b/i,
+  /\b(?:my |how many )?(?:steps|step count)\b/i,
+  /\b(?:my |what's my |what is my )?(?:heart rate|resting heart rate|resting hr|hr)\b/i,
+  /\b(?:my |how's my |how is my )?(?:health|fitness|activity|exercise|workout)\b/i,
+  /\b(?:my |how many )?(?:calories|active minutes|active time)\b/i,
+  /\b(?:sleep|sleep quality|sleep data|sleep score|sleep hours)\b/i,
+  /\b(?:health (?:data|metrics|summary|stats|check|report|update))\b/i,
+  /\b(?:how (?:am i|have i been) doing (?:health|physical|fitness|physically))\b/i,
 ];
 
 // ---------------------------------------------------------------------------
@@ -122,7 +166,29 @@ const ACTION_PATTERNS = [
 // ---------------------------------------------------------------------------
 
 const CURRENT_INFO_KEYWORDS =
-  /\b(latest|current|recent|today|yesterday|this week|this month|right now|news|update|happening|weather|price|stock|score|result|release|announce|launch|trending)\b/i;
+  /\b(latest|current|recent|today|yesterday|this week|this month|right now|news|update|happening|price|stock|score|result|release|announce|launch|trending)\b/i;
+
+// ---------------------------------------------------------------------------
+// Conversational prefix stripping
+// ---------------------------------------------------------------------------
+
+const CONVERSATIONAL_PREFIXES = /^(?:good|great|nice|cool|okay|ok|alright|sure|fine|perfect|right|hey nicole|hey|yo|so|well|oh|ah|hmm|also|and|but|now|please|actually|oh and|ok so|yeah|yep|yea)[,.:;!?\s]+/i;
+/**
+ * Strips natural conversational prefixes so the real intent gets matched.
+ * "good, search the web for X" → "search the web for X"
+ * "hey nicole, what's the weather" → "what's the weather"
+ * "ok so who is elon musk" → "who is elon musk"
+ */
+function stripConversationalPrefix(message: string): string {
+  let result = message;
+  // Apply up to 2 times to handle stacked prefixes like "ok so, search..."
+  for (let i = 0; i < 2; i++) {
+    const stripped = result.replace(CONVERSATIONAL_PREFIXES, "").trim();
+    if (stripped.length === 0 || stripped === result) break;
+    result = stripped;
+  }
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Main classifier
@@ -130,19 +196,23 @@ const CURRENT_INFO_KEYWORDS =
 
 export function classifyIntent(
   message: string,
-  _recentMessages: ChatMessage[] = []
+  recentMessages: ChatMessage[] = []
 ): IntentClassification {
-  const trimmed = message.trim();
-  const normalized = trimmed.toLowerCase();
+  const raw = message.trim();
+  const rawLower = raw.toLowerCase();
 
-  // 1. Casual — no tools, no memory
-  if (CASUAL_PATTERNS.some((p) => p.test(normalized))) {
+  // 1. Casual — check BEFORE stripping prefixes (if the whole message is casual, it's casual)
+  if (CASUAL_PATTERNS.some((p) => p.test(rawLower))) {
     return {
       intent: "casual",
       shouldSearchMemory: false,
       shouldSearchSources: false,
     };
   }
+
+  // Strip conversational prefixes for all remaining classification
+  const trimmed = stripConversationalPrefix(raw);
+  const normalized = trimmed.toLowerCase();
 
   // 2. Action request — direct tool handles it, minimal context
   if (ACTION_PATTERNS.some((p) => p.test(normalized))) {
@@ -186,7 +256,36 @@ export function classifyIntent(
     };
   }
 
-  // 6. Factual question — "who is X", "what is Y"
+  // 6. Weather question — direct routing to weather_get
+  for (const { pattern, locationGroup } of WEATHER_PATTERNS) {
+    const match = trimmed.match(pattern);
+    if (match) {
+      const loc = locationGroup && match[locationGroup]
+        ? match[locationGroup].trim()
+        : undefined;
+      // Filter out empty/noise location matches
+      const cleanLoc = loc && loc.length > 1 && !/^(today|tomorrow|this week|right now|now)$/i.test(loc)
+        ? loc
+        : undefined;
+      return {
+        intent: "weather_question",
+        weatherLocation: cleanLoc,
+        shouldSearchMemory: false,
+        shouldSearchSources: false,
+      };
+    }
+  }
+
+  // 7. Health question — "how did I sleep", "my steps"
+  if (HEALTH_PATTERNS.some((p) => p.test(normalized))) {
+    return {
+      intent: "health_question",
+      shouldSearchMemory: false,
+      shouldSearchSources: false,
+    };
+  }
+
+  // 8. Factual question — "who is X", "what is Y"
   for (const { pattern, queryGroup } of FACTUAL_PATTERNS) {
     const match = trimmed.match(pattern);
     if (match && match[queryGroup]) {
@@ -202,7 +301,7 @@ export function classifyIntent(
     }
   }
 
-  // 7. Contains current-info keywords — treat as factual
+  // 8. Contains current-info keywords — treat as factual
   if (CURRENT_INFO_KEYWORDS.test(normalized)) {
     return {
       intent: "factual_question",
@@ -212,7 +311,20 @@ export function classifyIntent(
     };
   }
 
-  // 8. Long questions (>20 chars ending with ?) — probably need context
+  // 9. Short conversational follow-up — stay with the current turn instead of
+  // spraying broad memory/source retrieval unless a real tool/action was matched above.
+  if (
+    recentMessages.some((entry) => entry.role === "assistant") &&
+    looksLikeTopicFollowUp(normalized)
+  ) {
+    return {
+      intent: "ambiguous",
+      shouldSearchMemory: false,
+      shouldSearchSources: false,
+    };
+  }
+
+  // 10. Long questions (>20 chars ending with ?) — probably need context
   if (normalized.endsWith("?") && normalized.length > 20) {
     return {
       intent: "ambiguous",
@@ -221,7 +333,7 @@ export function classifyIntent(
     };
   }
 
-  // 9. Ambiguous — auto-attach memory for anything non-trivial
+  // 11. Ambiguous — auto-attach memory for anything non-trivial
   const isSubstantive = normalized.length > 15 && !/^[a-z]{1,10}[.!?]*$/.test(normalized);
   return {
     intent: "ambiguous",

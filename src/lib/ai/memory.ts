@@ -3,6 +3,7 @@ import {
   memories,
   chatMessages,
   conversationSummaries,
+  toolInvocations,
 } from "@/lib/db/schema";
 import {
   and,
@@ -11,11 +12,13 @@ import {
   desc,
   eq,
   gt,
+  gte,
   isNotNull,
   lte,
 } from "drizzle-orm";
 import { chat, embed, isBackgroundAIEnabled, isEmbeddingAvailable } from "./router";
 import { ChatMessage } from "./types";
+import type { ChatMessageRecord } from "./topic-state";
 
 const MEMORY_EXTRACT_PROMPT = `You are Nicole's memory system. Given a conversation between Nicole and Roy, extract any new facts worth remembering long-term.
 
@@ -70,12 +73,67 @@ Allowed outputs:
 {"action":"ignore","targetId":"..."}
 {"action":"merge","targetId":"...","content":"...","category":"...","importance":7,"topic":"..."}`;
 
-const RECENT_MESSAGE_WINDOW = 20;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RECENT_FULL_CONTEXT_DAYS = 7;
+const RECENT_MESSAGE_WINDOW = 80;
 const SUMMARY_BATCH_SIZE = 12;
 const MIN_MESSAGES_TO_SUMMARIZE = 8;
 const SUMMARY_CONTEXT_LIMIT = 4;
+const MEMORY_CONTEXT_LIMIT = 8;
+const MEMORY_CORE_LIMIT = 3;
 const MEMORY_CANDIDATE_LIMIT = 6;
 const MEMORY_DEDUP_DISTANCE_THRESHOLD = 0.32;
+const MEMORY_RELEVANCE_THRESHOLD = 0.4;
+const TOOL_ACTIVITY_CONTEXT_LIMIT = 4;
+const TOOL_ACTIVITY_CANDIDATE_LIMIT = 16;
+const SUMMARY_RELEVANCE_CANDIDATE_LIMIT = 12;
+
+const CONTEXT_STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "also",
+  "and",
+  "been",
+  "before",
+  "between",
+  "could",
+  "from",
+  "have",
+  "into",
+  "just",
+  "like",
+  "more",
+  "need",
+  "past",
+  "please",
+  "said",
+  "same",
+  "that",
+  "them",
+  "there",
+  "these",
+  "they",
+  "thing",
+  "this",
+  "those",
+  "want",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "with",
+  "would",
+  "your",
+  "zoho",
+  "gmail",
+  "email",
+  "mail",
+  "inbox",
+  "nicole",
+  "roy",
+]);
 
 interface MemoryInput {
   content: string;
@@ -252,7 +310,7 @@ export async function extractAndStoreMemories(
  */
 export async function loadMemories(
   queryOrLimit?: string | number,
-  maybeLimit = 30
+  maybeLimit = MEMORY_CONTEXT_LIMIT
 ): Promise<string> {
   const query =
     typeof queryOrLimit === "string" ? queryOrLimit.trim() : undefined;
@@ -262,10 +320,16 @@ export async function loadMemories(
   try {
     const mems =
       query && query.length > 0
-        ? await loadRelevantMemories(query, limit)
-        : await loadTopMemories(limit);
+        ? await loadContextMemories(query, limit)
+        : await loadCoreMemories(limit);
 
     if (mems.length === 0) return "";
+
+    touchReferencedMemories(
+      mems
+        .map((memory) => memory.id)
+        .filter((id): id is string => Boolean(id))
+    ).catch(() => {});
 
     return mems
       .map((m) => {
@@ -288,6 +352,12 @@ export async function searchRelevantMemories(
 
   try {
     const mems = await loadRelevantMemories(trimmed, limit);
+
+    touchReferencedMemories(
+      mems
+        .map((memory) => ("id" in memory ? memory.id : undefined))
+        .filter((id): id is string => Boolean(id))
+    ).catch(() => {});
 
     return mems.map((memory) => ({
       id: "id" in memory ? memory.id : undefined,
@@ -312,23 +382,37 @@ export async function searchRelevantMemories(
  * without dragging the full transcript into every prompt.
  */
 export async function loadConversationSummaryContext(
-  limit = SUMMARY_CONTEXT_LIMIT
+  queryOrLimit?: string | number,
+  maybeLimit = SUMMARY_CONTEXT_LIMIT
 ): Promise<string> {
+  const query =
+    typeof queryOrLimit === "string" ? queryOrLimit.trim() : undefined;
+  const limit =
+    typeof queryOrLimit === "number" ? queryOrLimit : maybeLimit;
+
   try {
     const summaries = await db
       .select({
+        id: conversationSummaries.id,
         summary: conversationSummaries.summary,
         startCreatedAt: conversationSummaries.startCreatedAt,
         endCreatedAt: conversationSummaries.endCreatedAt,
         messageCount: conversationSummaries.messageCount,
+        createdAt: conversationSummaries.createdAt,
       })
       .from(conversationSummaries)
       .orderBy(desc(conversationSummaries.endCreatedAt), desc(conversationSummaries.createdAt))
-      .limit(limit);
+      .limit(SUMMARY_RELEVANCE_CANDIDATE_LIMIT);
 
     if (summaries.length === 0) return "";
 
-    return summaries
+    const ranked = rankSummaryContext(summaries, query).slice(0, limit);
+
+    if (ranked.length === 0) {
+      return "";
+    }
+
+    return ranked
       .reverse()
       .map((entry) => {
         const dateRange = formatSummaryDateRange(
@@ -356,25 +440,9 @@ export async function summarizeOldConversations(): Promise<void> {
   }
 
   try {
-    const recentMessages = await db
-      .select({
-        id: chatMessages.id,
-        createdAt: chatMessages.createdAt,
-      })
-      .from(chatMessages)
-      .orderBy(desc(chatMessages.createdAt))
-      .limit(RECENT_MESSAGE_WINDOW);
-
-    if (recentMessages.length < MIN_MESSAGES_TO_SUMMARIZE) {
-      return;
-    }
-
-    const oldestRecentMessage =
-      recentMessages[recentMessages.length - 1]?.createdAt ?? null;
-
-    if (!oldestRecentMessage) {
-      return;
-    }
+    const recentContextCutoff = new Date(
+      Date.now() - RECENT_FULL_CONTEXT_DAYS * DAY_MS
+    );
 
     const lastSummary = await db
       .select({
@@ -388,10 +456,10 @@ export async function summarizeOldConversations(): Promise<void> {
 
     const olderMessagesWhere = summaryCutoff
       ? and(
-          lte(chatMessages.createdAt, oldestRecentMessage),
+          lte(chatMessages.createdAt, recentContextCutoff),
           gt(chatMessages.createdAt, summaryCutoff)
         )
-      : lte(chatMessages.createdAt, oldestRecentMessage);
+      : lte(chatMessages.createdAt, recentContextCutoff);
 
     const olderMessages = await db
       .select({
@@ -441,7 +509,7 @@ export async function summarizeOldConversations(): Promise<void> {
 
 async function loadRelevantMemories(query: string, limit: number) {
   if (!isEmbeddingAvailable()) {
-    return loadTopMemories(limit);
+    return loadKeywordMatchedMemories(query, limit);
   }
 
   try {
@@ -466,16 +534,23 @@ async function loadRelevantMemories(query: string, limit: number) {
         desc(memories.lastReferencedAt),
         desc(memories.createdAt)
       )
-      .limit(limit);
+      .limit(Math.max(limit * 4, 12));
 
-    if (mems.length > 0) {
-      return mems;
+    const filtered = mems.filter(
+      (memory) =>
+        typeof memory.score === "number" &&
+        (memory.score <= MEMORY_RELEVANCE_THRESHOLD ||
+          memoryMatchesQuery(memory, query))
+    );
+
+    if (filtered.length > 0) {
+      return filtered.slice(0, limit);
     }
   } catch (error) {
     console.error("Semantic memory retrieval failed:", error);
   }
 
-  return loadTopMemories(limit);
+  return loadKeywordMatchedMemories(query, limit);
 }
 
 async function loadTopMemories(limit: number) {
@@ -499,11 +574,22 @@ async function loadTopMemories(limit: number) {
 export async function saveChatMessage(
   role: "user" | "assistant",
   content: string
-): Promise<void> {
+): Promise<ChatMessageRecord | null> {
   try {
-    await db.insert(chatMessages).values({ role, content });
+    const inserted = await db
+      .insert(chatMessages)
+      .values({ role, content })
+      .returning({
+        id: chatMessages.id,
+        role: chatMessages.role,
+        content: chatMessages.content,
+        createdAt: chatMessages.createdAt,
+      });
+
+    return inserted[0] as ChatMessageRecord | null;
   } catch (error) {
     console.error("Failed to save chat message:", error);
+    return null;
   }
 }
 
@@ -511,31 +597,103 @@ export async function saveChatMessage(
  * Load recent chat messages for context (sent to the AI).
  */
 export async function loadRecentMessages(limit = 20): Promise<ChatMessage[]> {
-  try {
-    const latestSummary = await db
-      .select({
-        endCreatedAt: conversationSummaries.endCreatedAt,
-      })
-      .from(conversationSummaries)
-      .orderBy(desc(conversationSummaries.endCreatedAt), desc(conversationSummaries.createdAt))
-      .limit(1);
+  const records = await loadRecentMessageRecords(limit);
+  return records.map((message) => ({
+    role: message.role,
+    content: message.content,
+  }));
+}
 
-    const summaryCutoff = latestSummary[0]?.endCreatedAt ?? null;
+export async function loadRecentMessageRecords(
+  limit = 20
+): Promise<ChatMessageRecord[]> {
+  try {
+    const recentCutoff = new Date(Date.now() - RECENT_FULL_CONTEXT_DAYS * DAY_MS);
 
     const msgs = await db
       .select({
+        id: chatMessages.id,
         role: chatMessages.role,
         content: chatMessages.content,
+        createdAt: chatMessages.createdAt,
       })
       .from(chatMessages)
-      .where(summaryCutoff ? gt(chatMessages.createdAt, summaryCutoff) : undefined)
+      .where(gte(chatMessages.createdAt, recentCutoff))
       .orderBy(desc(chatMessages.createdAt))
-      .limit(limit);
+      .limit(Math.max(limit, RECENT_MESSAGE_WINDOW));
 
     // Reverse so they're in chronological order
-    return msgs.reverse() as ChatMessage[];
+    return msgs.reverse() as ChatMessageRecord[];
   } catch {
     return [];
+  }
+}
+
+export function trimPendingUserMessage(
+  messages: ChatMessage[],
+  pendingUserMessage: string
+): ChatMessage[] {
+  const trimmed = pendingUserMessage.trim();
+  if (!trimmed || messages.length === 0) {
+    return messages;
+  }
+
+  const last = messages[messages.length - 1];
+  if (
+    last?.role === "user" &&
+    typeof last.content === "string" &&
+    last.content.trim() === trimmed
+  ) {
+    return messages.slice(0, -1);
+  }
+
+  return messages;
+}
+
+export async function loadRecentToolActivityContext(
+  queryOrLimit?: string | number,
+  maybeLimit = TOOL_ACTIVITY_CONTEXT_LIMIT
+): Promise<string> {
+  const query =
+    typeof queryOrLimit === "string" ? queryOrLimit.trim() : undefined;
+  const limit =
+    typeof queryOrLimit === "number" ? queryOrLimit : maybeLimit;
+
+  try {
+    const recentCutoff = new Date(Date.now() - RECENT_FULL_CONTEXT_DAYS * DAY_MS);
+    const rows = await db
+      .select({
+        toolName: toolInvocations.toolName,
+        input: toolInvocations.input,
+        output: toolInvocations.output,
+        createdAt: toolInvocations.createdAt,
+      })
+      .from(toolInvocations)
+      .where(
+        and(
+          eq(toolInvocations.status, "success"),
+          gte(toolInvocations.createdAt, recentCutoff)
+        )
+      )
+      .orderBy(desc(toolInvocations.createdAt))
+      .limit(TOOL_ACTIVITY_CANDIDATE_LIMIT);
+
+    if (rows.length === 0) {
+      return "";
+    }
+
+    const ranked = rankToolActivity(rows, query).slice(0, limit);
+    if (ranked.length === 0) {
+      return "";
+    }
+
+    return ranked
+      .reverse()
+      .map((row) => formatToolActivityLine(row))
+      .join("\n");
+  } catch (error) {
+    console.error("Failed to load recent tool activity:", error);
+    return "";
   }
 }
 
@@ -557,6 +715,292 @@ function formatSummaryDateRange(
 
 function formatSummaryDate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+async function loadCoreMemories(limit: number) {
+  return db
+    .select({
+      id: memories.id,
+      content: memories.content,
+      category: memories.category,
+      source: memories.source,
+      topic: memories.topic,
+      importance: memories.importance,
+    })
+    .from(memories)
+    .where(gte(memories.importance, 8))
+    .orderBy(
+      desc(memories.importance),
+      desc(memories.lastReferencedAt),
+      desc(memories.createdAt)
+    )
+    .limit(limit);
+}
+
+async function loadContextMemories(query: string, limit: number) {
+  const [core, relevant] = await Promise.all([
+    loadCoreMemories(MEMORY_CORE_LIMIT),
+    loadRelevantMemories(query, Math.max(limit - MEMORY_CORE_LIMIT, 4)),
+  ]);
+
+  const seen = new Set<string>();
+  return [...core, ...relevant].filter((memory) => {
+    if (!memory.id || seen.has(memory.id)) {
+      return false;
+    }
+
+    seen.add(memory.id);
+    return true;
+  }).slice(0, limit);
+}
+
+async function loadKeywordMatchedMemories(query: string, limit: number) {
+  const terms = extractSalientTerms(query);
+  if (terms.length === 0) {
+    return [];
+  }
+
+  const candidates = await db
+    .select({
+      id: memories.id,
+      content: memories.content,
+      category: memories.category,
+      source: memories.source,
+      topic: memories.topic,
+      importance: memories.importance,
+    })
+    .from(memories)
+    .orderBy(
+      desc(memories.lastReferencedAt),
+      desc(memories.importance),
+      desc(memories.createdAt)
+    )
+    .limit(100);
+
+  return candidates
+    .map((memory) => ({
+      ...memory,
+      keywordScore: scoreQueryAgainstText(
+        query,
+        `${memory.topic || ""}\n${memory.content}\n${memory.category}`
+      ),
+    }))
+    .filter((memory) => memory.keywordScore > 0)
+    .sort((a, b) => {
+      if (b.keywordScore !== a.keywordScore) {
+        return b.keywordScore - a.keywordScore;
+      }
+      return (b.importance || 0) - (a.importance || 0);
+    })
+    .slice(0, limit)
+    .map(({ keywordScore: _keywordScore, ...memory }) => memory);
+}
+
+function extractSalientTerms(text: string): string[] {
+  const tokens = text.toLowerCase().match(/[a-z0-9][a-z0-9._-]{2,}/g) || [];
+  const unique: string[] = [];
+
+  for (const token of tokens) {
+    if (CONTEXT_STOPWORDS.has(token)) {
+      continue;
+    }
+    if (!unique.includes(token)) {
+      unique.push(token);
+    }
+  }
+
+  return unique.slice(0, 10);
+}
+
+function scoreQueryAgainstText(query: string | undefined, text: string): number {
+  if (!query) {
+    return 0;
+  }
+
+  const terms = extractSalientTerms(query);
+  if (terms.length === 0) {
+    return 0;
+  }
+
+  const haystack = text.toLowerCase();
+  return terms.reduce(
+    (score, term) => score + (haystack.includes(term) ? 1 : 0),
+    0
+  );
+}
+
+function memoryMatchesQuery(
+  memory: { topic: string | null; content: string; category: string },
+  query: string
+): boolean {
+  return (
+    scoreQueryAgainstText(
+      query,
+      `${memory.topic || ""}\n${memory.content}\n${memory.category}`
+    ) > 0
+  );
+}
+
+function rankSummaryContext<
+  T extends {
+    summary: string;
+    startCreatedAt: Date | null;
+    endCreatedAt: Date | null;
+    messageCount: number;
+    createdAt: Date | null;
+  },
+>(summaries: T[], query?: string) {
+  if (!query?.trim()) {
+    return summaries.slice(0, SUMMARY_CONTEXT_LIMIT);
+  }
+
+  return summaries
+    .map((entry) => ({
+      entry,
+      score: scoreQueryAgainstText(query, entry.summary),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+
+      return (
+        (b.entry.endCreatedAt?.getTime() || b.entry.createdAt?.getTime() || 0) -
+        (a.entry.endCreatedAt?.getTime() || a.entry.createdAt?.getTime() || 0)
+      );
+    })
+    .map((item) => item.entry);
+}
+
+function rankToolActivity<
+  T extends {
+    toolName: string;
+    input: unknown;
+    output: unknown;
+    createdAt: Date | null;
+  },
+>(rows: T[], query?: string) {
+  if (!query?.trim()) {
+    return rows.slice(0, TOOL_ACTIVITY_CONTEXT_LIMIT);
+  }
+
+  const ranked = rows
+    .map((row) => ({
+      row,
+      score: scoreQueryAgainstText(
+        query,
+        `${row.toolName}\n${JSON.stringify(row.input) || ""}\n${
+          JSON.stringify(row.output) || ""
+        }`
+      ),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return (b.row.createdAt?.getTime() || 0) - (a.row.createdAt?.getTime() || 0);
+    })
+    .map((item) => item.row);
+
+  return ranked;
+}
+
+function formatToolActivityLine(row: {
+  toolName: string;
+  input: unknown;
+  output: unknown;
+  createdAt: Date | null;
+}): string {
+  const timestamp = row.createdAt
+    ? row.createdAt.toISOString().replace("T", " ").slice(0, 16)
+    : "recently";
+  const output =
+    row.output && typeof row.output === "object"
+      ? (row.output as Record<string, unknown>)
+      : null;
+
+  if (row.toolName === "email_search") {
+    const provider = typeof output?.provider === "string" ? output.provider : "email";
+    const results = Array.isArray(output?.results) ? output.results : [];
+    const first =
+      results[0] && typeof results[0] === "object"
+        ? (results[0] as Record<string, unknown>)
+        : null;
+    const sender =
+      typeof first?.sender === "string"
+        ? first.sender
+        : typeof first?.fromAddress === "string"
+          ? first.fromAddress
+          : null;
+    return `- ${timestamp}: used ${provider} email search and found ${results.length} message${
+      results.length === 1 ? "" : "s"
+    }${sender ? `, including one from ${sender}` : ""}.`;
+  }
+
+  if (row.toolName === "email_read") {
+    const message =
+      output?.message && typeof output.message === "object"
+        ? (output.message as Record<string, unknown>)
+        : null;
+    const subject =
+      typeof message?.subject === "string" ? message.subject : "an email";
+    const sender =
+      typeof message?.sender === "string"
+        ? message.sender
+        : typeof message?.fromAddress === "string"
+          ? message.fromAddress
+          : "someone";
+    return `- ${timestamp}: read "${subject}" from ${sender}.`;
+  }
+
+  if (row.toolName === "email_thread_read") {
+    const count =
+      typeof output?.messageCount === "number" ? output.messageCount : null;
+    return `- ${timestamp}: opened an email thread${
+      count ? ` with ${count} messages` : ""
+    }.`;
+  }
+
+  if (row.toolName === "integration_connect") {
+    const provider =
+      output?.provider && typeof output.provider === "object"
+        ? (output.provider as Record<string, unknown>)
+        : null;
+    const title =
+      typeof provider?.title === "string" ? provider.title : "an integration";
+    return `- ${timestamp}: connected ${title}.`;
+  }
+
+  if (row.toolName === "calendar_read") {
+    return `- ${timestamp}: checked the calendar.`;
+  }
+
+  if (row.toolName === "web_search") {
+    const results = Array.isArray(output?.results) ? output.results : [];
+    return `- ${timestamp}: ran a web search and got ${results.length} result${
+      results.length === 1 ? "" : "s"
+    }.`;
+  }
+
+  return `- ${timestamp}: used ${row.toolName}.`;
+}
+
+async function touchReferencedMemories(ids: string[]) {
+  if (ids.length === 0) {
+    return;
+  }
+
+  const uniqueIds = Array.from(new Set(ids));
+  await Promise.all(
+    uniqueIds.map((id) =>
+      db
+        .update(memories)
+        .set({ lastReferencedAt: new Date() })
+        .where(eq(memories.id, id))
+    )
+  );
 }
 
 function normalizeMemoryInput(memory: MemoryInput): MemoryInput | null {

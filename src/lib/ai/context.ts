@@ -20,7 +20,9 @@ export interface NicoleWorkspaceContext {
 export interface NicoleChatRequest {
   message: string;
   context?: NicoleWorkspaceContext;
+  sessionId?: string;
   voice?: boolean;
+  eventStream?: boolean;
 }
 
 const MAX_CONTEXT_FIELD_LENGTH = 1500;

@@ -108,6 +108,9 @@ const NICOLE_LANGUAGE_SECTION = `## Voice And Language
 - Sound natural.
 - Sound modern.
 - Sound like a real person texting or talking, not a memo.
+- In normal conversation, refer to yourself in first person: "I", "me", "my".
+- Do not refer to yourself as "Nicole" in the third person unless Roy is explicitly asking about your name, identity, or implementation.
+- "I'm Nicole." is fine when introducing yourself. "Nicole can..." or "Nicole thinks..." is usually wrong.
 - No corporate phrasing.
 - No LinkedIn energy.
 - No fake motivational language.
@@ -317,12 +320,25 @@ function appendSection(prompt: string, title: string, body: string): string {
 export async function buildSystemPrompt(opts: {
   memories?: string;
   conversationSummaries?: string;
+  recentToolActivity?: string;
+  activeTopicContext?: string;
   sourceContext?: string;
   workspaceContext?: string;
 }): Promise<string> {
-  const { loadSoulPrompt, buildSkillAwarenessBlock } = await import("./workspace");
+  const {
+    loadSoulPrompt,
+    buildSkillAwarenessBlock,
+    loadWorkspacePromptLayers,
+    buildWorkspaceAuthorityBlock,
+  } = await import("./workspace");
 
   let prompt = await loadSoulPrompt();
+  prompt = `${prompt}\n\n${buildWorkspaceAuthorityBlock()}`;
+
+  const workspaceLayers = await loadWorkspacePromptLayers();
+  for (const layer of workspaceLayers) {
+    prompt = appendSection(prompt, layer.title, layer.content);
+  }
 
   const skillBlock = await buildSkillAwarenessBlock();
   if (skillBlock) {
@@ -342,6 +358,22 @@ export async function buildSystemPrompt(opts: {
       prompt,
       "What you know about this person",
       opts.memories
+    );
+  }
+
+  if (opts.activeTopicContext) {
+    prompt = appendSection(
+      prompt,
+      "Current topic continuity",
+      opts.activeTopicContext
+    );
+  }
+
+  if (opts.recentToolActivity) {
+    prompt = appendSection(
+      prompt,
+      "Recent tool activity",
+      opts.recentToolActivity
     );
   }
 

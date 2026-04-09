@@ -29,6 +29,8 @@ const OLLAMA_EMBED_TIMEOUT_MS = Number.parseInt(
 const CHAT_FALLBACK_PROVIDER =
   process.env.CHAT_FALLBACK_PROVIDER === "cencori" ? "cencori" : null;
 const BACKGROUND_AI_ENABLED = resolveBackgroundAIEnabled();
+let lastChatWarmAt = 0;
+const CHAT_WARM_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Send a chat request through the configured inference provider.
@@ -61,6 +63,31 @@ export async function chat(
     }
 
     throw error;
+  }
+}
+
+export async function warmChatRuntime(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - lastChatWarmAt < CHAT_WARM_TTL_MS) {
+    return;
+  }
+
+  const warmMessages: ChatMessage[] = [
+    { role: "system", content: "You are Nicole. Reply with one short word." },
+    { role: "user", content: "ready" },
+  ];
+
+  try {
+    await chat(warmMessages, {
+      temperature: 0,
+      maxTokens: 4,
+    });
+    lastChatWarmAt = now;
+  } catch (error) {
+    console.warn(
+      "Voice chat warmup failed:",
+      error instanceof Error ? error.message : error
+    );
   }
 }
 

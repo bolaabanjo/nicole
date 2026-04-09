@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { and, asc, count, desc, eq, gte, lte } from "drizzle-orm";
 import { chat } from "@/lib/ai/router";
 import { searchRelevantMemories, storeMemory } from "@/lib/ai/memory";
+import type { ActiveOperationalThread } from "@/lib/ai/session-thread";
 import { ChatMessage } from "@/lib/ai/types";
 import { db } from "@/lib/db/client";
 import {
@@ -16,7 +17,27 @@ import {
   createGoogleCalendarEvent,
   listGoogleCalendarEvents,
 } from "@/lib/integrations/google-calendar";
-import { searchZohoMail, sendZohoMail } from "@/lib/integrations/zoho-mail";
+import {
+  disconnectIntegration,
+  getIntegrationStatus,
+  normalizeIntegrationProviderQuery,
+  resolveIntegrationProviderQuery,
+  startIntegrationConnection,
+} from "@/lib/integrations/operations";
+import {
+  readGmailMessage,
+  readGmailThread,
+  searchGmail,
+  sendGmail,
+  sendGmailReply,
+} from "@/lib/integrations/gmail";
+import {
+  readZohoMailMessage,
+  readZohoMailThread,
+  searchZohoMail,
+  sendZohoMail,
+  sendZohoMailReply,
+} from "@/lib/integrations/zoho-mail";
 import { deepResearch } from "@/lib/search/research";
 import { searchRelevantSourceChunks } from "@/lib/search/semantic";
 import { fetchPageContent, formatSearchResults, searchWeb } from "@/lib/search/web";
@@ -37,6 +58,11 @@ export interface ToolExecutionResult {
   input: Record<string, unknown>;
   output?: unknown;
   error?: string;
+}
+
+export interface ToolActivityPreview {
+  preActionText?: string;
+  statusText?: string;
 }
 
 interface ToolHandlerContext {
@@ -73,6 +99,10 @@ const CASUAL_TOOL_BYPASS_PATTERNS = [
   /^how are you[.!?]*$/i,
 ];
 const DIRECT_TOOL_COMMAND_PATTERNS = [
+  /\bconnect (?:my |to )?(?:google calendar|calendar|zoho|zoho mail|gmail|google mail|email)\b/i,
+  /\bdisconnect (?:my |from )?(?:google calendar|calendar|zoho|zoho mail|gmail|google mail|email)\b/i,
+  /\b(?:is|check|show|what(?:'s| is)) .*?(?:connected|integration)\b/i,
+  /\bwhat integrations\b/i,
   /\bremind me to\b/i,
   /\bset a reminder\b/i,
   /\bcreate a reminder\b/i,
@@ -89,6 +119,13 @@ const DIRECT_TOOL_COMMAND_PATTERNS = [
   /\bwhat changed in (?:the )?repo\b/i,
   /\bsearch (?:my )?email\b/i,
   /\bfind (?:an |the )?email\b/i,
+  /\b(?:read|open|show) (?:the )?(?:email|mail|message|thread|conversation)\b/i,
+  /\bwhat(?:\s+else)?\s+did\s+.+\s+say\b/i,
+  /\btell me more about .+(?:email|mail|message)\b/i,
+  /\bwhat(?:'s| is| else is) in (?:that|this|the) (?:email|mail|message)\b/i,
+  /\bdraft (?:a )?reply\b/i,
+  /\bwrite (?:a )?reply\b/i,
+  /\bsend (?:that|the|this)?\s*reply\b/i,
   /\bsend (?:an )?email\b/i,
   /\brun [`'"]/i,
   /\bexecute [`'"]/i,
@@ -267,6 +304,28 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const query = readRequiredString(input, "query");
     const result = await deepResearch(query);
     return result;
+  },
+  weather_get: async (input) => {
+    const { getWeather, formatWeatherForPrompt } = await import("@/lib/integrations/weather");
+    const location = readOptionalString(input, "location") || undefined;
+    const forecastDays = readOptionalNumber(input, "forecastDays", 3, 1, 7);
+    const result = await getWeather(location, forecastDays);
+    return { formatted: formatWeatherForPrompt(result), ...result };
+  },
+  health_metric_read: async (input) => {
+    const { getHealthSummary, getHealthForDate, getRecentHealth, formatHealthForPrompt } = await import("@/lib/integrations/health");
+    const date = readOptionalString(input, "date");
+    const days = readOptionalNumber(input, "days", 7, 1, 30);
+
+    if (date) {
+      const data = await getHealthForDate(date);
+      if (!data) return { date, data: null, message: `No health data for ${date}.` };
+      return { date, data };
+    }
+
+    const summary = await getHealthSummary();
+    const recent = await getRecentHealth(days);
+    return { formatted: formatHealthForPrompt(summary), summary, recent };
   },
   note_create: async (input) => {
     const content = readRequiredString(input, "content");
@@ -487,17 +546,34 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   email_search: async (input) => {
     const query = readRequiredString(input, "query");
     const limit = readOptionalNumber(input, "limit", 8, 1, 20);
-    const results = await searchZohoMail({ query, limit });
+    const providerHint = normalizeEmailProviderHint(
+      readOptionalString(input, "provider")
+    );
 
-    if (results) {
-      return {
-        provider: "zoho_mail",
-        results,
-      };
+    if (!providerHint || providerHint === "gmail") {
+      const gmailResults = await searchGmail({ query, limit });
+
+      if (gmailResults) {
+        return {
+          provider: "gmail",
+          results: gmailResults,
+        };
+      }
+    }
+
+    if (!providerHint || providerHint === "zoho_mail") {
+      const zohoResults = await searchZohoMail({ query, limit });
+
+      if (zohoResults) {
+        return {
+          provider: "zoho_mail",
+          results: zohoResults,
+        };
+      }
     }
 
     throw new Error(
-      "Zoho Mail is not connected yet. Connect it from Integrations first."
+      "No supported mail provider is connected yet. Ask Nicole to connect Gmail or Zoho Mail first."
     );
   },
   email_send: async (input) => {
@@ -505,15 +581,225 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const subject = readRequiredString(input, "subject");
     const body = readRequiredString(input, "body");
     const cc = readOptionalString(input, "cc");
-    const result = await sendZohoMail({ to, subject, body, cc });
+    const gmailResult = await sendGmail({ to, subject, body, cc });
 
-    if (result) {
-      return result;
+    if (gmailResult) {
+      return gmailResult;
+    }
+
+    const zohoResult = await sendZohoMail({ to, subject, body, cc });
+
+    if (zohoResult) {
+      return zohoResult;
     }
 
     throw new Error(
-      "Zoho Mail is not connected yet. Connect it from Integrations first."
+      "No supported mail provider is connected yet. Ask Nicole to connect Gmail or Zoho Mail first."
     );
+  },
+  email_read: async (input) => {
+    const reference = await resolveEmailReference(input);
+    if (!reference) {
+      throw new Error(
+        "I couldn't tell which email to open. Ask me to read a numbered result like 'read the first email' after a search."
+      );
+    }
+
+    if (reference.provider === "gmail") {
+      const message = await readGmailMessage({ messageId: reference.id });
+      if (message) {
+        return {
+          provider: "gmail",
+          message,
+        };
+      }
+    }
+
+    if (reference.provider === "zoho_mail") {
+      const message = await readZohoMailMessage({
+        messageId: reference.id,
+        folderId: reference.folderId || null,
+      });
+      if (message) {
+        return {
+          provider: "zoho_mail",
+          message,
+        };
+      }
+    }
+
+    throw new Error("I couldn't load that email.");
+  },
+  email_thread_read: async (input) => {
+    const reference = await resolveEmailReference(input);
+    if (!reference) {
+      throw new Error(
+        "I couldn't tell which thread you meant. Ask me to open the thread for a recent search result first."
+      );
+    }
+
+    if (reference.provider === "gmail") {
+      const threadId = reference.threadId;
+      if (!threadId) {
+        throw new Error("That Gmail message doesn't have a usable thread id.");
+      }
+
+      const thread = await readGmailThread({ threadId });
+      if (thread) {
+        return thread;
+      }
+    }
+
+    if (reference.provider === "zoho_mail") {
+      const thread = await readZohoMailThread({
+        messageId: reference.id,
+        folderId: reference.folderId || null,
+      });
+      if (thread) {
+        return thread;
+      }
+    }
+
+    throw new Error("I couldn't load that email thread.");
+  },
+  email_reply_draft: async (input) => {
+    const reference = await resolveEmailReference(input);
+    if (!reference) {
+      throw new Error(
+        "I couldn't tell which email to reply to. Read an email first or point me at a recent result."
+      );
+    }
+
+    const instructions =
+      readOptionalString(input, "instructions") ||
+      "Draft a concise, professional reply that directly addresses the message.";
+
+    const message = await loadEmailMessageForReference(reference);
+    if (!message) {
+      throw new Error("I couldn't load the original email for drafting.");
+    }
+
+    const draft = await draftReplyFromEmail(message, instructions);
+    return {
+      provider: reference.provider,
+      target: {
+        messageId: message.id,
+        threadId: message.threadId || null,
+        subject: message.subject,
+        fromAddress: message.fromAddress,
+        sender: message.sender,
+      },
+      draft: {
+        to: message.fromAddress,
+        subject: draft.subject,
+        body: draft.body,
+        cc: null,
+        originalMessageId: message.id,
+        threadId: message.threadId || null,
+        messageIdHeader: message.messageIdHeader || null,
+        references: message.references || message.messageIdHeader || null,
+      },
+    };
+  },
+  email_reply_send: async (input) => {
+    const explicitBody = readOptionalString(input, "body");
+    const explicitSubject = readOptionalString(input, "subject");
+    const explicitCc = readOptionalString(input, "cc");
+    const reference = await resolveEmailReference(input);
+    const recentDraft = await getLatestEmailReplyDraftOutput(
+      normalizeEmailProviderHint(readOptionalString(input, "provider"))
+    );
+
+    const draft = recentDraft?.draft || null;
+    const provider = reference?.provider || recentDraft?.provider || null;
+
+    if (!provider) {
+      throw new Error(
+        "I don't have a reply draft ready to send. Ask me to draft the reply first."
+      );
+    }
+
+    const targetMessage =
+      reference ? await loadEmailMessageForReference(reference) : null;
+    const originalMessageId =
+      readOptionalString(input, "originalMessageId") ||
+      targetMessage?.id ||
+      draft?.originalMessageId ||
+      null;
+    const subject =
+      explicitSubject || draft?.subject || targetMessage?.subject || null;
+    const body = explicitBody || draft?.body || null;
+    const cc = explicitCc || draft?.cc || null;
+    const to =
+      readOptionalString(input, "to") ||
+      targetMessage?.fromAddress ||
+      draft?.to ||
+      null;
+
+    if (!to || !subject || !body || !originalMessageId) {
+      throw new Error(
+        "I don't have enough reply details yet. Draft the reply first, then ask me to send it."
+      );
+    }
+
+    if (provider === "gmail") {
+      const result = await sendGmailReply({
+        to,
+        subject,
+        body,
+        cc,
+        threadId:
+          readOptionalString(input, "threadId") ||
+          targetMessage?.threadId ||
+          draft?.threadId ||
+          null,
+        messageIdHeader:
+          readOptionalString(input, "messageIdHeader") ||
+          targetMessage?.messageIdHeader ||
+          draft?.messageIdHeader ||
+          null,
+        references:
+          readOptionalString(input, "references") ||
+          targetMessage?.references ||
+          draft?.references ||
+          null,
+      });
+
+      if (result) {
+        return result;
+      }
+    }
+
+    if (provider === "zoho_mail") {
+      const result = await sendZohoMailReply({
+        originalMessageId,
+        to,
+        subject,
+        body,
+        cc,
+      });
+
+      if (result) {
+        return result;
+      }
+    }
+
+    throw new Error("I couldn't send that reply.");
+  },
+  integration_status: async (input) => {
+    const provider = readOptionalString(input, "provider");
+    return getIntegrationStatus(provider || undefined);
+  },
+  integration_connect: async (input) => {
+    const provider = readRequiredString(input, "provider");
+    const clientSurface = readOptionalString(input, "clientSurface");
+    return startIntegrationConnection(provider, {
+      clientSurface: clientSurface || undefined,
+    });
+  },
+  integration_disconnect: async (input) => {
+    const provider = readRequiredString(input, "provider");
+    return disconnectIntegration(provider);
   },
   terminal_run: async (input) => {
     const command = readRequiredString(input, "command");
@@ -575,8 +861,8 @@ When to use web_open:
 - After a web_search, when the search snippets are not enough and you need the full page content
 
 When to use workspace tools:
-- workspace_read: When you need to check your own files — your user profile, context, daily notes, or skill definitions
-- workspace_write: When you learn something durable about Roy (update user.md), or need to update your current context (context.md)
+- workspace_read: When you need to check your own files — USER.md, CONTEXT.md, MEMORY.md, daily notes, or skill definitions
+- workspace_write: When you learn something durable about Roy (update USER.md or MEMORY.md), or need to update your current context (CONTEXT.md)
 - workspace_append_daily: When something notable happens worth logging — a decision, a completed task, a new preference learned
 - workspace_list: When you need to see what's in your workspace directories
 
@@ -627,82 +913,742 @@ export type { IntentClassification };
 export async function runIntentBasedTooling(
   intent: IntentClassification,
   message: string,
-  recentMessages: ChatMessage[] = []
+  recentMessages: ChatMessage[] = [],
+  clientSurface?: string,
+  activeThread?: ActiveOperationalThread | null
 ): Promise<ToolExecutionResult[]> {
   const results: ToolExecutionResult[] = [];
 
-  switch (intent.intent) {
-    case "casual":
-      // No tools needed
-      break;
+  const toolCalls = resolveIntentToolCalls(
+    intent,
+    message,
+    recentMessages,
+    clientSurface,
+    activeThread
+  );
 
-    case "factual_question":
-      // Always web search — never let the model guess
-      if (intent.searchQuery) {
-        results.push(
-          await executeToolCall({
-            name: "web_search",
-            arguments: { query: intent.searchQuery, limit: 5 },
-          })
-        );
-      }
-      break;
-
-    case "source_question":
-      // Search ingested sources
-      if (intent.sourceQuery) {
-        results.push(
-          await executeToolCall({
-            name: "source_search",
-            arguments: { query: intent.sourceQuery, limit: 6 },
-          })
-        );
-      }
-      break;
-
-    case "personal_question":
-      // Try existing direct routing for calendar/reminder/email commands
-      {
-        const directCall = detectDirectToolCall(message, recentMessages);
-        if (directCall) {
-          results.push(await executeToolCall(directCall));
-        }
-      }
-      break;
-
-    case "action_request":
-      // Direct tool routing handles reminders, calendar creates, email, git, terminal
-      {
-        const directCall = detectDirectToolCall(message, recentMessages);
-        if (directCall) {
-          results.push(await executeToolCall(directCall));
-        }
-      }
-      break;
-
-    case "workspace_question":
-      // Workspace tool routing
-      {
-        const directCall = detectDirectToolCall(message, recentMessages);
-        if (directCall) {
-          results.push(await executeToolCall(directCall));
-        }
-      }
-      break;
-
-    case "ambiguous":
-      // No explicit tools — context (memory/sources) auto-attached by the route
-      // But still try direct routing in case it matches a command pattern
-      {
-        const directCall = detectDirectToolCall(message, recentMessages);
-        if (directCall) {
-          results.push(await executeToolCall(directCall));
-        }
-      }
-      break;
+  for (const toolCall of toolCalls) {
+    results.push(await executeToolCall(toolCall));
   }
 
   return results;
+}
+
+export function describeIntentToolActivity(
+  intent: IntentClassification,
+  message: string,
+  recentMessages: ChatMessage[] = [],
+  clientSurface?: string,
+  activeThread?: ActiveOperationalThread | null
+): ToolActivityPreview | null {
+  const [firstToolCall] = resolveIntentToolCalls(
+    intent,
+    message,
+    recentMessages,
+    clientSurface,
+    activeThread
+  );
+
+  if (!firstToolCall) {
+    return null;
+  }
+
+  switch (firstToolCall.name) {
+    case "integration_status":
+      return {
+        preActionText: "Let me check what accounts you have connected.",
+        statusText: "Checking your connected accounts",
+      };
+    case "integration_connect":
+      return {
+        preActionText: "Sure, let's get that connected.",
+        statusText: "Starting the connection flow",
+      };
+    case "integration_disconnect":
+      return {
+        preActionText: "Hold on, let me take care of that for you.",
+        statusText: "Updating your connected accounts",
+      };
+    case "web_search":
+      return {
+        preActionText: "Good question, let me look that up.",
+        statusText: "Searching the web",
+      };
+    case "deep_research":
+      return {
+        preActionText: "That's a bit complex, let me do some deeper research.",
+        statusText: "Researching this",
+      };
+    case "calendar_read":
+      return {
+        preActionText: "Let me see what's on your calendar.",
+        statusText: "Checking your calendar",
+      };
+    case "calendar_create_event":
+      return {
+        preActionText: "Let me get that on your calendar for you.",
+        statusText: "Creating your calendar event",
+      };
+    case "reminder_create":
+      return {
+        preActionText: "Sure, I'll set that reminder for you.",
+        statusText: "Creating your reminder",
+      };
+    case "email_search":
+      return {
+        preActionText: "Let me check your inbox for that.",
+        statusText: "Checking your email",
+      };
+    case "email_read":
+      return {
+        preActionText: "Let me open that email for you.",
+        statusText: "Reading that email",
+      };
+    case "email_thread_read":
+      return {
+        preActionText: "Let me pull up that conversation.",
+        statusText: "Reading that conversation",
+      };
+    case "email_reply_draft":
+      return {
+        preActionText: "I'll draft a reply for you right now.",
+        statusText: "Drafting your reply",
+      };
+    case "email_reply_send":
+    case "email_send":
+      return {
+        preActionText: "I'll get that sent off for you.",
+        statusText: "Sending your email",
+      };
+    case "source_search":
+      return {
+        preActionText: "Let me check your library.",
+        statusText: "Searching your notes and sources",
+      };
+    case "workspace_read":
+    case "workspace_list":
+      return {
+        preActionText: "Let me check my workspace for you.",
+        statusText: "Checking Nicole's workspace",
+      };
+    case "git_status":
+      return {
+        preActionText: "Let me check the repository status.",
+        statusText: "Checking the repo",
+      };
+    case "terminal_run":
+      return {
+        preActionText: "I'll run that command for you.",
+        statusText: "Running that command",
+      };
+    case "weather_get":
+      return {
+        preActionText: "Let me check the weather for you.",
+        statusText: "Checking the weather",
+      };
+    case "health_metric_read":
+      return {
+        preActionText: "Let me pull up your health data.",
+        statusText: "Reading health metrics",
+      };
+    default:
+      return {
+        preActionText: "Give me just a second to check that.",
+        statusText: "Working on it",
+      };
+  }
+}
+
+export function previewIntentToolCalls(
+  intent: IntentClassification,
+  message: string,
+  recentMessages: ChatMessage[] = [],
+  clientSurface?: string,
+  activeThread?: ActiveOperationalThread | null
+): ToolCall[] {
+  return resolveIntentToolCalls(
+    intent,
+    message,
+    recentMessages,
+    clientSurface,
+    activeThread
+  );
+}
+
+export async function generateToolActivityPreface(
+  message: string,
+  preview: ToolActivityPreview
+): Promise<string | null> {
+  const fallback = preview.preActionText?.trim() || null;
+  const statusText = preview.statusText?.trim();
+
+  if (!fallback && !statusText) {
+    return null;
+  }
+
+  try {
+    const prefacePromise = chat(
+      [
+        {
+          role: "system",
+          content: `You write a single short, warm, and natural pre-action line that Nicole says before performing a task or using a tool.
+
+Rules:
+- Output exactly one short sentence.
+- Maximum 12 words.
+- Sound conversational, empathetic, and direct. Avoid sounding like a computer.
+- Examples: "Let me check that for you.", "I'll pull that up right now.", "Hold on, let me find that.", "I'm on it, let me check your calendar."
+- Use first person ("I", "I'll", "Me").
+- Do not mention tool names, APIs, JSON, or internal processes.
+- Do not announce the result yet.
+- Do not use markdown, quotes, or labels.`,
+        },
+        {
+          role: "user",
+          content: `Roy asked: ${message}\n\nNicole is about to do this: ${statusText || "check something for Roy"}.\n\nWrite the one-sentence pre-action line Nicole should say right before that starts.`,
+        },
+      ],
+      {
+        temperature: 0.7,
+        maxTokens: 24,
+      }
+    );
+
+    const result = await Promise.race([
+      prefacePromise,
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve(fallback || ""), 900)
+      ),
+    ]);
+
+    const text = (typeof result === "string" ? result : String(result))
+      .replace(/^["'`\s]+|["'`\s]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!text) {
+      return fallback;
+    }
+
+    return text;
+  } catch {
+    return fallback;
+  }
+}
+
+export function buildToolActivityFeedEntries(
+  toolResults: ToolExecutionResult[]
+): string[] {
+  return toolResults.flatMap((result) => buildSingleToolActivityEntries(result));
+}
+
+export function buildDirectToolResponse(
+  toolResults: ToolExecutionResult[]
+): string | null {
+  if (toolResults.length === 0) {
+    return null;
+  }
+
+  const supported = toolResults.every((result) =>
+    [
+      "integration_status",
+      "integration_connect",
+      "integration_disconnect",
+      "calendar_read",
+      "calendar_create_event",
+      "email_search",
+      "email_read",
+      "email_thread_read",
+      "email_reply_draft",
+      "email_reply_send",
+      "email_send",
+    ].includes(result.name)
+  );
+
+  if (!supported) {
+    return null;
+  }
+
+  const lines = toolResults
+    .map((result) => buildDirectSingleToolResponse(result))
+    .filter((line): line is string => Boolean(line?.trim()));
+
+  return lines.length > 0 ? lines.join("\n\n") : null;
+}
+
+function buildSingleToolActivityEntries(
+  result: ToolExecutionResult
+): string[] {
+  if (!result.ok) {
+    switch (result.name) {
+      case "integration_status":
+      case "integration_connect":
+      case "integration_disconnect":
+        return ["Couldn't check your connected accounts"];
+      case "email_search":
+      case "email_read":
+      case "email_thread_read":
+      case "email_reply_draft":
+      case "email_reply_send":
+      case "email_send":
+        return ["Couldn't complete that email action"];
+      case "calendar_read":
+      case "calendar_create_event":
+        return ["Couldn't complete that calendar action"];
+      case "web_search":
+      case "deep_research":
+        return ["Couldn't finish that web lookup"];
+      default:
+        return ["Couldn't finish that step"];
+    }
+  }
+
+  switch (result.name) {
+    case "integration_status":
+      return buildIntegrationStatusActivityEntries(result.output);
+    case "integration_connect":
+      return buildIntegrationConnectActivityEntries(result.output);
+    case "integration_disconnect":
+      return buildIntegrationDisconnectActivityEntries(result.output);
+    case "web_search":
+      return buildWebSearchActivityEntries(result);
+    case "deep_research":
+      return ["Finished gathering research sources"];
+    case "calendar_read":
+      return buildCalendarReadActivityEntries(result.output);
+    case "calendar_create_event":
+      return buildCalendarCreateActivityEntries(result.output);
+    case "reminder_create":
+      return buildReminderCreateActivityEntries(result.output);
+    case "email_search":
+      return buildEmailSearchActivityEntries(result.output);
+    case "email_read":
+      return buildEmailReadActivityEntries(result.output);
+    case "email_thread_read":
+      return buildEmailThreadActivityEntries(result.output);
+    case "email_reply_draft":
+      return ["Drafted your reply"];
+    case "email_reply_send":
+      return ["Sent your reply"];
+    case "email_send":
+      return ["Sent your email"];
+    case "source_search":
+      return ["Searched your notes and sources"];
+    case "workspace_read":
+      return ["Checked Nicole's workspace"];
+    case "workspace_list":
+      return ["Listed Nicole's workspace files"];
+    case "git_status":
+      return ["Checked the repo status"];
+    case "terminal_run":
+      return ["Ran that command"];
+    default:
+      return [`Finished ${humanizeToolName(result.name)}`];
+  }
+}
+
+function buildDirectSingleToolResponse(
+  result: ToolExecutionResult
+): string | null {
+  if (
+    result.name !== "integration_status" &&
+    result.name !== "integration_connect" &&
+    result.name !== "integration_disconnect" &&
+    result.name !== "calendar_read" &&
+    result.name !== "calendar_create_event" &&
+    result.name !== "email_search" &&
+    result.name !== "email_read" &&
+    result.name !== "email_thread_read" &&
+    result.name !== "email_reply_draft" &&
+    result.name !== "email_reply_send" &&
+    result.name !== "email_send"
+  ) {
+    return null;
+  }
+
+  if (!result.ok) {
+    return result.error || "I couldn't complete that action.";
+  }
+
+  if (result.name === "calendar_read") {
+    return buildDirectCalendarReadResponse(result.output);
+  }
+
+  if (result.name === "calendar_create_event") {
+    return buildDirectCalendarCreateResponse(result.output);
+  }
+
+  if (result.name === "email_search") {
+    return buildDirectEmailSearchResponse(result.output);
+  }
+
+  if (result.name === "email_read") {
+    return buildDirectEmailReadResponse(result.output);
+  }
+
+  if (result.name === "email_thread_read") {
+    return buildDirectEmailThreadReadResponse(result.output);
+  }
+
+  if (result.name === "email_reply_draft") {
+    return buildDirectEmailReplyDraftResponse(result.output);
+  }
+
+  if (result.name === "email_reply_send" || result.name === "email_send") {
+    return buildDirectEmailSendResponse(result.output);
+  }
+
+  const output = asIntegrationToolOutput(result.output);
+  if (!output) {
+    return "I couldn't read that integration result clearly.";
+  }
+
+  if (output.ok === false) {
+    return output.message || "That integration request couldn't be completed.";
+  }
+
+  if (result.name === "integration_connect") {
+    const providerTitle = output.provider?.title || "that integration";
+
+    if (output.provider?.connected) {
+      return `${providerTitle} is already connected.`;
+    }
+
+    if (output.browserOpened) {
+      return `I opened the ${providerTitle} sign-in flow in your browser. Finish the consent there, then come back to me.`;
+    }
+
+    if (output.connectUrl) {
+      return `${providerTitle} is ready to connect. Open this link to finish the consent: ${output.connectUrl}`;
+    }
+
+    return output.message || `I started the ${providerTitle} connection flow.`;
+  }
+
+  if (result.name === "integration_disconnect") {
+    return (
+      output.message ||
+      `${output.provider?.title || "That integration"} is disconnected now.`
+    );
+  }
+
+  if (Array.isArray(output.allProviders) && output.allProviders.length > 0) {
+    return output.allProviders
+      .map((provider) => {
+        const title = provider.title || "Unknown integration";
+        if (provider.connected) {
+          return `${title} is connected.`;
+        }
+
+        if (provider.status === "planned") {
+          return `${title} is planned but not wired yet.`;
+        }
+
+        if (provider.configured) {
+          return `${title} is available but not connected yet.`;
+        }
+
+        return `${title} is not configured on this Mac yet.`;
+      })
+      .join("\n");
+  }
+
+  if (output.provider?.title) {
+    const title = output.provider.title;
+    if (output.provider.connected) {
+      return `${title} is connected.`;
+    }
+
+    if (output.provider.status === "planned") {
+      return `${title} is planned, but it isn't wired yet.`;
+    }
+
+    if (output.provider.configured) {
+      return `${title} is available but not connected yet.`;
+    }
+
+    return `${title} is not configured on this Mac yet.`;
+  }
+
+  return output.message || "I checked that integration status for you.";
+}
+
+function buildDirectCalendarReadResponse(output: unknown): string {
+  const record = output as
+    | {
+        events?: Array<{
+          title?: string;
+          startAt?: string | Date;
+          endAt?: string | Date;
+        }>;
+      }
+    | undefined;
+
+  const events = Array.isArray(record?.events) ? record.events : [];
+
+  if (events.length === 0) {
+    return "I checked your calendar and I didn't find anything in that window.";
+  }
+
+  const lines = events.slice(0, 5).map((event) => {
+    const title = event.title?.trim() || "Untitled event";
+    const start = formatCalendarDateTime(event.startAt);
+    const end = formatCalendarDateTime(event.endAt, { omitDateIfSameDayAs: event.startAt });
+    return end ? `${title} — ${start} to ${end}` : `${title} — ${start}`;
+  });
+
+  const intro =
+    events.length === 1
+      ? "I found 1 event on your calendar:"
+      : `I found ${events.length} events on your calendar:`;
+
+  return `${intro}\n- ${lines.join("\n- ")}`;
+}
+
+function buildDirectCalendarCreateResponse(output: unknown): string {
+  const record = output as
+    | {
+        event?: {
+          title?: string;
+          startAt?: string | Date;
+          endAt?: string | Date;
+        };
+      }
+    | undefined;
+
+  const title = record?.event?.title?.trim() || "That event";
+  const start = formatCalendarDateTime(record?.event?.startAt);
+  const end = formatCalendarDateTime(record?.event?.endAt, {
+    omitDateIfSameDayAs: record?.event?.startAt,
+  });
+
+  if (start && end) {
+    return `${title} is on your calendar for ${start} to ${end}.`;
+  }
+
+  if (start) {
+    return `${title} is on your calendar for ${start}.`;
+  }
+
+  return `${title} is on your calendar now.`;
+}
+
+function buildDirectEmailSearchResponse(output: unknown): string {
+  const record = output as
+    | {
+        provider?: string;
+        results?: Array<{
+          subject?: string;
+          sender?: string;
+          fromAddress?: string;
+          summary?: string;
+          receivedAt?: string;
+        }>;
+      }
+    | undefined;
+
+  const provider = formatEmailProviderTitle(record?.provider);
+  const results = Array.isArray(record?.results) ? record.results : [];
+
+  if (results.length === 0) {
+    return `I checked ${provider} and I didn't find matching emails.`;
+  }
+
+  const lines = results.slice(0, 5).map((item) => {
+    const subject = item.subject?.trim() || "(no subject)";
+    const sender = item.sender || item.fromAddress || "unknown sender";
+    const summary = item.summary?.trim();
+
+    return summary
+      ? `${subject} — from ${sender}. ${summary}`
+      : `${subject} — from ${sender}`;
+  });
+
+  const intro =
+    results.length === 1
+      ? `I found 1 email in ${provider}:`
+      : `I found ${results.length} emails in ${provider}:`;
+
+  return `${intro}\n- ${lines.join("\n- ")}`;
+}
+
+function buildDirectEmailReadResponse(output: unknown): string {
+  const record = output as
+    | {
+        provider?: string;
+        message?: {
+          subject?: string;
+          sender?: string;
+          fromAddress?: string;
+          bodyText?: string;
+          summary?: string;
+        };
+      }
+    | undefined;
+
+  const provider = formatEmailProviderTitle(record?.provider);
+  const message = record?.message;
+  const subject = message?.subject?.trim() || "(no subject)";
+  const sender = message?.sender || message?.fromAddress || "unknown sender";
+  const body = (message?.bodyText || message?.summary || "").trim();
+
+  if (!body) {
+    return `I opened “${subject}” in ${provider}. It's from ${sender}. I couldn't extract a readable body from it.`;
+  }
+
+  const clipped = body.slice(0, 900);
+  return `I opened “${subject}” in ${provider}. It's from ${sender}.\n\n${clipped}${body.length > clipped.length ? "..." : ""}`;
+}
+
+function buildDirectEmailThreadReadResponse(output: unknown): string {
+  const record = output as
+    | {
+        provider?: string;
+        messages?: Array<{
+          subject?: string;
+          sender?: string;
+          fromAddress?: string;
+          bodyText?: string;
+        }>;
+        thread?: {
+          messages?: Array<{
+            subject?: string;
+            sender?: string;
+            fromAddress?: string;
+            bodyText?: string;
+          }>;
+        };
+        note?: string;
+      }
+    | undefined;
+
+  const provider = formatEmailProviderTitle(record?.provider);
+  const messages = Array.isArray(record?.messages)
+    ? record.messages
+    : Array.isArray(record?.thread?.messages)
+      ? record.thread.messages
+      : [];
+
+  if (messages.length === 0) {
+    return `I opened that thread in ${provider}, but I couldn't extract any readable messages from it.`;
+  }
+
+  const lines = messages.slice(0, 5).map((message, index) => {
+    const subject = message.subject?.trim() || "(no subject)";
+    const sender = message.sender || message.fromAddress || "unknown sender";
+    const body = message.bodyText?.trim();
+    const clipped = body ? body.slice(0, 220) : "";
+    const detail = clipped ? ` ${clipped}${body && body.length > clipped.length ? "..." : ""}` : "";
+    return `${index + 1}. ${subject} — from ${sender}.${detail}`;
+  });
+
+  return [
+    `I opened that thread in ${provider}.`,
+    ...lines,
+    record?.note?.trim() ? `Note: ${record.note.trim()}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildDirectEmailReplyDraftResponse(output: unknown): string {
+  const record = output as
+    | {
+        provider?: string;
+        draft?: {
+          to?: string;
+          subject?: string;
+          body?: string;
+        };
+      }
+    | undefined;
+
+  const provider = formatEmailProviderTitle(record?.provider);
+  const subject = record?.draft?.subject?.trim() || "(no subject)";
+  const to = record?.draft?.to?.trim() || "the intended recipient";
+  const body = record?.draft?.body?.trim() || "";
+  const clipped = body.slice(0, 600);
+
+  return [
+    `I drafted a reply in ${provider} to ${to}.`,
+    `Subject: ${subject}`,
+    clipped ? `Draft:\n${clipped}${body.length > clipped.length ? "..." : ""}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildDirectEmailSendResponse(output: unknown): string {
+  const record = output as
+    | {
+        provider?: string;
+        sent?: {
+          to?: string | string[];
+          subject?: string;
+        };
+      }
+    | undefined;
+
+  const provider = formatEmailProviderTitle(record?.provider);
+  const to = Array.isArray(record?.sent?.to)
+    ? record?.sent?.to?.join(", ")
+    : record?.sent?.to;
+  const subject = record?.sent?.subject?.trim();
+
+  if (to && subject) {
+    return `I sent that email in ${provider} to ${to} with the subject “${subject}.”`;
+  }
+
+  if (subject) {
+    return `I sent that email in ${provider} with the subject “${subject}.”`;
+  }
+
+  return `I sent that email in ${provider}.`;
+}
+
+function formatCalendarDateTime(
+  value: string | Date | undefined,
+  options?: { omitDateIfSameDayAs?: string | Date | undefined }
+): string {
+  if (!value) {
+    return "";
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const baseFormatter = new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  const timeOnlyFormatter = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  if (options?.omitDateIfSameDayAs) {
+    const compare =
+      options.omitDateIfSameDayAs instanceof Date
+        ? options.omitDateIfSameDayAs
+        : new Date(options.omitDateIfSameDayAs);
+
+    if (
+      !Number.isNaN(compare.getTime()) &&
+      compare.getFullYear() === date.getFullYear() &&
+      compare.getMonth() === date.getMonth() &&
+      compare.getDate() === date.getDate()
+    ) {
+      return timeOnlyFormatter.format(date);
+    }
+  }
+
+  return baseFormatter.format(date);
 }
 
 /**
@@ -770,6 +1716,256 @@ export function shouldAttemptToolUse(message: string): boolean {
   }
 
   return false;
+}
+
+function resolveIntentToolCalls(
+  intent: IntentClassification,
+  message: string,
+  recentMessages: ChatMessage[] = [],
+  clientSurface?: string,
+  activeThread?: ActiveOperationalThread | null
+): ToolCall[] {
+  switch (intent.intent) {
+    case "casual":
+      return [];
+
+    case "factual_question":
+      if (intent.searchQuery) {
+        return [
+          {
+            name: "web_search",
+            arguments: { query: intent.searchQuery, limit: 5 },
+          },
+        ];
+      }
+      return [];
+
+    case "source_question":
+      if (intent.sourceQuery) {
+        return [
+          {
+            name: "source_search",
+            arguments: { query: intent.sourceQuery, limit: 6 },
+          },
+        ];
+      }
+      return [];
+
+    case "weather_question":
+      return [
+        {
+          name: "weather_get",
+          arguments: {
+            ...(intent.weatherLocation ? { location: intent.weatherLocation } : {}),
+            forecastDays: 3,
+          },
+        },
+      ];
+
+    case "health_question":
+      return [{ name: "health_metric_read", arguments: {} }];
+
+    case "personal_question":
+    case "action_request":
+    case "workspace_question":
+    case "ambiguous": {
+      const directCall = detectDirectToolCall(
+        message,
+        recentMessages,
+        clientSurface,
+        activeThread
+      );
+      return directCall ? [directCall] : [];
+    }
+  }
+}
+
+function buildIntegrationStatusActivityEntries(output: unknown): string[] {
+  const record = output as
+    | {
+        provider?: { title?: string; connected?: boolean; configured?: boolean; status?: string };
+        allProviders?: Array<{
+          title?: string;
+          connected?: boolean;
+          configured?: boolean;
+          status?: string;
+        }>;
+      }
+    | undefined;
+
+  if (Array.isArray(record?.allProviders) && record.allProviders.length > 0) {
+    return record.allProviders.slice(0, 4).map((provider) => {
+      const title = provider.title || "This integration";
+      if (provider.connected) {
+        return `${title} is connected`;
+      }
+
+      if (provider.status === "planned") {
+        return `${title} is planned`;
+      }
+
+      if (provider.configured) {
+        return `${title} isn't connected yet`;
+      }
+
+      return `${title} isn't configured yet`;
+    });
+  }
+
+  if (record?.provider?.title) {
+    const title = record.provider.title;
+    if (record.provider.connected) {
+      return [`${title} is connected`];
+    }
+
+    if (record.provider.status === "planned") {
+      return [`${title} is planned`];
+    }
+
+    if (record.provider.configured) {
+      return [`${title} isn't connected yet`];
+    }
+
+    return [`${title} isn't configured yet`];
+  }
+
+  return ["Checked your connected accounts"];
+}
+
+function buildIntegrationConnectActivityEntries(output: unknown): string[] {
+  const record = output as
+    | { provider?: { title?: string }; browserOpened?: boolean; connectUrl?: string | null }
+    | undefined;
+  const title = record?.provider?.title || "that integration";
+
+  if (record?.browserOpened) {
+    return [`Opened the ${title} sign-in page`];
+  }
+
+  if (record?.connectUrl) {
+    return [`Prepared the ${title} connection flow`];
+  }
+
+  return [`Started the ${title} connection flow`];
+}
+
+function buildIntegrationDisconnectActivityEntries(output: unknown): string[] {
+  const record = output as { provider?: { title?: string } } | undefined;
+  if (record?.provider?.title) {
+    return [`Disconnected ${record.provider.title}`];
+  }
+
+  return ["Disconnected that integration"];
+}
+
+function buildWebSearchActivityEntries(result: ToolExecutionResult): string[] {
+  const output = asWebSearchToolOutput(result.output);
+  const query =
+    typeof result.input.query === "string" && result.input.query.trim().length > 0
+      ? result.input.query.trim()
+      : null;
+
+  if (!output || output.status !== "ok") {
+    return query
+      ? [`Searched the web for “${query}”`]
+      : ["Searched the web"];
+  }
+
+  const resultCount = Array.isArray(output.results) ? output.results.length : 0;
+  if (query && resultCount > 0) {
+    return [`Found ${resultCount} web result${resultCount === 1 ? "" : "s"} for “${query}”`];
+  }
+
+  if (resultCount > 0) {
+    return [`Found ${resultCount} web result${resultCount === 1 ? "" : "s"}`];
+  }
+
+  return query
+    ? [`Searched the web for “${query}”`]
+    : ["Searched the web"];
+}
+
+function buildCalendarReadActivityEntries(output: unknown): string[] {
+  const record = output as { events?: unknown[] } | undefined;
+  const eventCount = Array.isArray(record?.events) ? record!.events!.length : 0;
+  if (eventCount > 0) {
+    return [`Checked your calendar`, `Found ${eventCount} upcoming event${eventCount === 1 ? "" : "s"}`];
+  }
+
+  return ["Checked your calendar"];
+}
+
+function buildCalendarCreateActivityEntries(output: unknown): string[] {
+  const record = output as { event?: { title?: string } } | undefined;
+  if (record?.event?.title) {
+    return [`Created “${record.event.title}” on your calendar`];
+  }
+
+  return ["Created your calendar event"];
+}
+
+function buildReminderCreateActivityEntries(output: unknown): string[] {
+  const record = output as { reminder?: { title?: string } } | undefined;
+  if (record?.reminder?.title) {
+    return [`Created the reminder “${record.reminder.title}”`];
+  }
+
+  return ["Created your reminder"];
+}
+
+function buildEmailSearchActivityEntries(output: unknown): string[] {
+  const record = output as { provider?: string; results?: unknown[] } | undefined;
+  const providerTitle = formatEmailProviderTitle(record?.provider);
+  const resultCount = Array.isArray(record?.results) ? record!.results!.length : 0;
+
+  if (resultCount > 0) {
+    return [`Found ${resultCount} email${resultCount === 1 ? "" : "s"} in ${providerTitle}`];
+  }
+
+  return [`Checked ${providerTitle}`];
+}
+
+function buildEmailReadActivityEntries(output: unknown): string[] {
+  const record = output as { message?: { subject?: string } } | undefined;
+  if (record?.message?.subject) {
+    return [`Opened “${record.message.subject}”`];
+  }
+
+  return ["Opened that email"];
+}
+
+function buildEmailThreadActivityEntries(output: unknown): string[] {
+  const record = output as
+    | { messages?: unknown[]; thread?: { messages?: unknown[] } }
+    | undefined;
+  const messages =
+    Array.isArray(record?.messages)
+      ? record?.messages
+      : Array.isArray(record?.thread?.messages)
+        ? record?.thread?.messages
+        : [];
+
+  if (messages.length > 0) {
+    return [`Opened the email thread`, `Loaded ${messages.length} message${messages.length === 1 ? "" : "s"} in that conversation`];
+  }
+
+  return ["Opened the email thread"];
+}
+
+function formatEmailProviderTitle(provider: unknown): string {
+  if (provider === "gmail") {
+    return "Gmail";
+  }
+
+  if (provider === "zoho_mail") {
+    return "Zoho Mail";
+  }
+
+  return "your email";
+}
+
+function humanizeToolName(name: string): string {
+  return name.replace(/_/g, " ");
 }
 
 export async function runToolPlanningLoop(
@@ -856,6 +2052,28 @@ export function formatToolResultsForPrompt(
         return formatWebSearchToolResult(result);
       }
 
+      if (result.name === "weather_get") {
+        return formatWeatherToolResult(result);
+      }
+
+      if (
+        result.name === "email_search" ||
+        result.name === "email_read" ||
+        result.name === "email_thread_read" ||
+        result.name === "email_reply_draft" ||
+        result.name === "email_reply_send"
+      ) {
+        return formatEmailToolResult(result);
+      }
+
+      if (
+        result.name === "integration_status" ||
+        result.name === "integration_connect" ||
+        result.name === "integration_disconnect"
+      ) {
+        return formatIntegrationToolResult(result);
+      }
+
       if (!result.ok) {
         return `Tool ${result.name} failed.\nError: ${result.error}`;
       }
@@ -869,13 +2087,64 @@ export function formatToolResultsForPrompt(
     .join("\n\n");
 }
 
+/**
+ * Clean text version of tool results — used when injecting into a user message
+ * (for search/weather). No meta-instructions, just the data.
+ */
+export function buildToolResultsText(toolResults: ToolExecutionResult[]): string {
+  return toolResults
+    .map((result) => {
+      if (!result.ok) {
+        return `Search failed: ${result.error || "unavailable"}`;
+      }
+
+      if (result.name === "web_search") {
+        const output = asWebSearchToolOutput(result.output);
+        if (!output || output.status !== "ok") {
+          return `Web search returned no usable results.`;
+        }
+
+        const results = Array.isArray(output.results)
+          ? output.results.filter(
+              (item) =>
+                typeof item?.title === "string" &&
+                item.title.trim().length > 0
+            )
+          : [];
+
+        const lines = results.map((item, i) => {
+          const title = item.title!.trim();
+          const url = item.url?.trim() || "";
+          const content = typeof item.content === "string" ? item.content.trim() : "";
+          return `${i + 1}. ${title}\n   URL: ${url}${content ? `\n   ${content}` : ""}`;
+        });
+
+        let text = lines.join("\n\n");
+
+        if (typeof output.topResultContent === "string" && output.topResultContent.length > 0) {
+          text += `\n\n--- Full content from top result ---\n${output.topResultContent}`;
+        }
+
+        return text;
+      }
+
+      if (result.name === "weather_get") {
+        const output = result.output as { formatted?: string };
+        return output?.formatted || JSON.stringify(result.output, null, 2);
+      }
+
+      return JSON.stringify(result.output, null, 2);
+    })
+    .join("\n\n");
+}
+
 export function buildToolPromptBlock(toolResults: ToolExecutionResult[]): string {
   const toolContext = formatToolResultsForPrompt(toolResults);
   if (!toolContext) {
     return "";
   }
 
-  return `\n\n## Tool results\nNicole called tools before answering. CRITICAL RULES:\n- Treat tool results as the source of truth for current or external information.\n- For non-search tools, base your answer only on the tool results below.\n- If web_search says live Google search was unavailable, say that clearly first. Then you may give a cautious fallback answer from your prior knowledge, but you must label it as not verified by live Google search.\n- If web_search says the live results were thin or inconclusive, say that clearly first. Then you may give a cautious fallback answer, clearly labeled as not fully verified by live Google search.\n- If web_search returned usable live results, answer from those live results and do not present prior knowledge as if it came from live search.\n- Never claim to have searched the web if the tool says live search failed or was weak.\n- Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
+  return `\n\n## Tool results\nNicole called tools before answering. CRITICAL RULES:\n- Treat tool results as the source of truth for current or external information.\n- For non-search tools, base your answer only on the tool results below.\n- If web_search says live Google search was unavailable, say that clearly first. Then you may give a cautious fallback answer from your prior knowledge, but you must label it as not verified by live Google search.\n- If web_search says the live results were thin or inconclusive, say that clearly first. Then you may give a cautious fallback answer, clearly labeled as not fully verified by live Google search.\n- If web_search returned usable live results, answer from those live results and do not present prior knowledge as if it came from live search.\n- Never claim to have searched the web if the tool says live search failed or was weak.\n- Never claim to have read, drafted, or sent email unless the corresponding email_* tool result is present below.\n- If integration_connect says the browser was opened, tell Roy to finish the official sign-in flow there. Do not send him to /integrations.\n- If integration_connect returns a connectUrl without opening the browser, give him that URL plainly and tell him to finish the consent there.\n- If integration_status or integration_disconnect returns provider state, treat that state as the truth.\n- Do not expose internal tool mechanics unless the user explicitly asks.\n\n${toolContext}`;
 }
 
 export function parseToolCall(content: string): ToolCall | null {
@@ -959,21 +2228,36 @@ export async function executeToolCall(
 
 function detectDirectToolCall(
   message: string,
-  recentMessages: ChatMessage[] = []
+  recentMessages: ChatMessage[] = [],
+  clientSurface?: string,
+  activeThread?: ActiveOperationalThread | null
 ): ToolCall | null {
-  const trimmed = message.trim();
+  const trimmed = normalizeDirectToolMessage(message);
 
   if (!trimmed) {
     return null;
   }
 
   return (
+    parseIntegrationConnectToolCall(
+      trimmed,
+      recentMessages,
+      clientSurface,
+      activeThread
+    ) ||
+    parseIntegrationDisconnectToolCall(trimmed) ||
+    parseIntegrationStatusToolCall(trimmed) ||
     parseWebSearchToolCall(trimmed, recentMessages) ||
     parseDeepResearchToolCall(trimmed, recentMessages) ||
     parseReminderToolCall(trimmed) ||
     parseCalendarCreateToolCall(trimmed) ||
     parseCalendarReadToolCall(trimmed) ||
     parseEmailSearchToolCall(trimmed) ||
+    parseEmailFollowUpToolCall(trimmed) ||
+    parseEmailThreadReadToolCall(trimmed) ||
+    parseEmailReadToolCall(trimmed) ||
+    parseEmailReplyDraftToolCall(trimmed) ||
+    parseEmailReplySendToolCall(trimmed) ||
     parseEmailSendToolCall(trimmed) ||
     parseGitStatusToolCall(trimmed) ||
     parseTerminalToolCall(trimmed) ||
@@ -986,6 +2270,7 @@ function parseWebSearchToolCall(
   message: string,
   recentMessages: ChatMessage[]
 ): ToolCall | null {
+  const normalizedMessage = normalizeDirectToolMessage(message);
   const explicitMatch = message.match(
     /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?(?:search|search the web|search web|web search|google|look up|lookup)\s+(?:the web\s+)?(?:for\s+)?(.+)$/i
   );
@@ -993,6 +2278,24 @@ function parseWebSearchToolCall(
   if (explicitMatch) {
     const query = cleanSearchQuery(explicitMatch[1]);
     if (query) {
+      const providerResolution = resolveIntegrationProviderQuery(query);
+      const wholeMessageProviderResolution =
+        resolveIntegrationProviderQuery(normalizedMessage);
+      const normalizedQuery = normalizeIntegrationProviderQuery(query);
+      if (
+        /^google\s+/i.test(normalizedMessage) &&
+        (providerResolution.provider ||
+          wholeMessageProviderResolution.provider ||
+          /\b(calendar|gcal|mail|gmail|zoho|reminder|reminders|apple)\b/i.test(
+            normalizedQuery
+          ) ||
+          /\b(connected|connection|auth|oauth|sign in|signin|linked|set up|setup)\b/i.test(
+            normalizedQuery
+          ))
+      ) {
+        return null;
+      }
+
       return {
         name: "web_search",
         arguments: { query, limit: 5 },
@@ -1065,6 +2368,149 @@ function parseDeepResearchToolCall(
   return null;
 }
 
+function parseIntegrationConnectToolCall(
+  message: string,
+  recentMessages: ChatMessage[],
+  clientSurface?: string,
+  activeThread?: ActiveOperationalThread | null
+): ToolCall | null {
+  const normalizedMessage = normalizeDirectToolMessage(message);
+  const activeIntegrationAction =
+    activeThread?.kind === "integration" ? activeThread.action : null;
+  const explicitMatch = message.match(
+    /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+|i(?:'d| would)\s+like to\s+)?(?:connect|link|hook up|set up)\s+(?:my\s+)?(.+?)(?:\s+(?:for me|please))?[.!?]*$/i
+  );
+
+  if (explicitMatch) {
+    const provider = cleanIntegrationProviderQuery(explicitMatch[1]);
+    if (provider && looksLikeIntegrationProviderQuery(provider)) {
+      return {
+        name: "integration_connect",
+        arguments: {
+          provider,
+          ...(clientSurface ? { clientSurface } : {}),
+        },
+      };
+    }
+  }
+
+  const bareProviderResolution = resolveIntegrationProviderQuery(normalizedMessage);
+  if (
+    bareProviderResolution.provider &&
+    (activeIntegrationAction === "connect" ||
+      (!activeIntegrationAction &&
+        isActiveIntegrationConversation(recentMessages, activeThread)))
+  ) {
+    return {
+      name: "integration_connect",
+      arguments: {
+        provider: bareProviderResolution.provider.id,
+        ...(clientSurface ? { clientSurface } : {}),
+      },
+    };
+  }
+
+  if (/^(?:connect|link|set up)\s+(?:him|her|them|it)\.?$/i.test(message)) {
+    const inferred = inferIntegrationQueryFromHistory(recentMessages, activeThread);
+    if (inferred) {
+      return {
+        name: "integration_connect",
+        arguments: {
+          provider: inferred,
+          ...(clientSurface ? { clientSurface } : {}),
+        },
+      };
+    }
+  }
+
+  if (looksLikeIntegrationConnectFollowUp(message)) {
+    const inferred = inferIntegrationQueryFromHistory(recentMessages, activeThread);
+    if (inferred) {
+      return {
+        name: "integration_connect",
+        arguments: {
+          provider: inferred,
+          ...(clientSurface ? { clientSurface } : {}),
+        },
+      };
+    }
+  }
+
+  return null;
+}
+
+function parseIntegrationDisconnectToolCall(message: string): ToolCall | null {
+  const match = message.match(
+    /^(?:please\s+)?(?:can you\s+|could you\s+|i need you to\s+|i want you to\s+)?disconnect\s+(?:my\s+)?(.+?)(?:\s+(?:for me|please))?[.!?]*$/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const provider = cleanIntegrationProviderQuery(match[1]);
+  if (!provider || !looksLikeIntegrationProviderQuery(provider)) {
+    return null;
+  }
+
+  return {
+    name: "integration_disconnect",
+    arguments: { provider },
+  };
+}
+
+function parseIntegrationStatusToolCall(message: string): ToolCall | null {
+  const normalizedMessage = normalizeDirectToolMessage(message);
+
+  if (
+    /\bwhat integrations(?: do you have| are connected)?\b/i.test(message) ||
+    /\bshow (?:me )?(?:your |my )?integrations\b/i.test(message) ||
+    /\bwhat'?s connected\b/i.test(message)
+  ) {
+    return {
+      name: "integration_status",
+      arguments: {},
+    };
+  }
+
+  const statusMatch = message.match(
+    /^(?:is|check whether|check if|show whether|what(?:'s| is) the status of)\s+(?:my\s+)?(.+?)\s+(?:connected|set up|linked)(?:\s+yet)?[.!?]*$/i
+  );
+
+  if (statusMatch) {
+    const provider = cleanIntegrationProviderQuery(statusMatch[1]);
+    if (!provider || !looksLikeIntegrationProviderQuery(provider)) {
+      return null;
+    }
+
+    return {
+      name: "integration_status",
+      arguments: { provider },
+    };
+  }
+
+  const bareProviderResolution = resolveIntegrationProviderQuery(normalizedMessage);
+  if (bareProviderResolution.provider) {
+    return {
+      name: "integration_status",
+      arguments: { provider: bareProviderResolution.provider.id },
+    };
+  }
+
+  const normalizedProviderOnly = cleanIntegrationProviderQuery(normalizedMessage);
+  const providerOnlyResolution = resolveIntegrationProviderQuery(
+    normalizedProviderOnly
+  );
+  if (providerOnlyResolution.provider) {
+    return {
+      name: "integration_status",
+      arguments: { provider: providerOnlyResolution.provider.id },
+    };
+  }
+
+  return null;
+}
+
 function parseToolRegistryCall(message: string): ToolCall | null {
   if (
     /\b(list tools|what tools can you use|what can you do|show tools|tool registry)\b/i.test(
@@ -1083,7 +2529,7 @@ function parseWorkspaceToolCall(message: string): ToolCall | null {
     /\bwhat do you know about me\b/i.test(message) ||
     /\byour? (?:notes|file|profile) (?:on|about) me\b/i.test(message)
   ) {
-    return { name: "workspace_read", arguments: { path: "user.md" } };
+    return { name: "workspace_read", arguments: { path: "USER.md" } };
   }
 
   // "check your context" / "what are you working on"
@@ -1091,7 +2537,7 @@ function parseWorkspaceToolCall(message: string): ToolCall | null {
     /\byour? (?:current )?context\b/i.test(message) ||
     /\bwhat are you (?:working on|focused on|tracking)\b/i.test(message)
   ) {
-    return { name: "workspace_read", arguments: { path: "context.md" } };
+    return { name: "workspace_read", arguments: { path: "CONTEXT.md" } };
   }
 
   // "check your workspace" / "list your files"
@@ -1110,17 +2556,25 @@ function parseWorkspaceToolCall(message: string): ToolCall | null {
 }
 
 function parseCalendarReadToolCall(message: string): ToolCall | null {
+  const normalizedMessage = normalizeDirectToolMessage(message);
+
   if (
-    /\bwhat'?s on my calendar\b/i.test(message) ||
-    /\bcheck my calendar\b/i.test(message) ||
-    /\bshow my calendar\b/i.test(message) ||
-    /\bmy schedule\b/i.test(message) ||
-    /\bupcoming events\b/i.test(message) ||
-    /\bfree time\b/i.test(message) ||
-    /\bavailability\b/i.test(message) ||
-    /\bam i free\b/i.test(message)
+    /\bwhat'?s on my calendar\b/i.test(normalizedMessage) ||
+    /\bcheck my calendar\b/i.test(normalizedMessage) ||
+    /\bshow my calendar\b/i.test(normalizedMessage) ||
+    /\bmy schedule\b/i.test(normalizedMessage) ||
+    /\bupcoming events\b/i.test(normalizedMessage) ||
+    /\bfree time\b/i.test(normalizedMessage) ||
+    /\bavailability\b/i.test(normalizedMessage) ||
+    /\bam i free\b/i.test(normalizedMessage) ||
+    /\b(?:do i have|check if i have|what do i have|am i free|am i available)\b.*\b(?:meeting|meetings|event|events|appointment|appointments|calendar)\b/i.test(
+      normalizedMessage
+    ) ||
+    /\b(?:do i have|what do i have|am i free|am i available)\b.*\b(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|this week)\b/i.test(
+      normalizedMessage
+    )
   ) {
-    const range = extractCalendarRange(message);
+    const range = extractCalendarRange(normalizedMessage);
     return {
       name: "calendar_read",
       arguments: range,
@@ -1264,6 +2718,102 @@ function inferSearchQueryFromHistory(recentMessages: ChatMessage[]): string | nu
   return null;
 }
 
+function inferIntegrationQueryFromHistory(
+  recentMessages: ChatMessage[],
+  activeThread?: ActiveOperationalThread | null
+): string | null {
+  if (activeThread?.kind === "integration" && activeThread.providerId) {
+    return activeThread.providerId;
+  }
+
+  const candidates = [...recentMessages]
+    .reverse()
+    .map((message) => message.content.trim());
+
+  for (const content of candidates) {
+    const directResolution = resolveIntegrationProviderQuery(content);
+    if (directResolution.provider) {
+      return directResolution.provider.id;
+    }
+
+    const match = content.match(
+      /(?:connect|link|set up|disconnect|check if)\s+(?:my\s+)?(.+?)(?:\s+(?:connected|set up|linked))?[.!?]*$/i
+    );
+
+    if (match?.[1]) {
+      const cleaned = cleanIntegrationProviderQuery(match[1]);
+      if (cleaned && looksLikeIntegrationProviderQuery(cleaned)) {
+        return cleaned;
+      }
+    }
+  }
+
+  return null;
+}
+
+function isActiveIntegrationConversation(
+  recentMessages: ChatMessage[],
+  activeThread?: ActiveOperationalThread | null
+): boolean {
+  if (activeThread?.kind === "integration") {
+    return true;
+  }
+
+  const candidates = [...recentMessages].reverse().slice(0, 8);
+
+  return candidates.some((message) =>
+    /\b(connect|connection|oauth|auth|sign-?in|linked|integration)\b/i.test(
+      message.content
+    )
+  );
+}
+
+function normalizeDirectToolMessage(message: string): string {
+  let normalized = message.trim();
+
+  const prefixes = [
+    /^(?:bro|hey nicole|hey|yo|nicole)\b[,.:;!\s]*/i,
+    /^(?:let'?s|lets)\s+(?:just\s+)?/i,
+    /^(?:okay|ok|alright|right|cool|so|well|please)\b[,.:;!\s]*/i,
+    /^(?:yes|yeah|yep|yup|sure)\b[,.:;!\s]*/i,
+  ];
+
+  for (let i = 0; i < 3; i += 1) {
+    let changed = false;
+    for (const prefix of prefixes) {
+      const next = normalized.replace(prefix, "").trim();
+      if (next && next !== normalized) {
+        normalized = next;
+        changed = true;
+      }
+    }
+    if (!changed) {
+      break;
+    }
+  }
+
+  return normalized;
+}
+
+function looksLikeIntegrationConnectFollowUp(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (/^(?:yes|yeah|yep|yup|sure|okay|ok|alright|do it|go ahead|please do)[.!?]*$/i.test(normalized)) {
+    return true;
+  }
+
+  return [
+    /^(?:yes|yeah|yep|yup|sure|okay|ok|alright|do it|go ahead|please do)\b.*\b(?:initiate|start|launch|open|oauth|auth|connection|connect|flow|setup|set up|sign-?in)\b/i,
+    /\b(?:initiate|start|launch|open)\b.*\b(?:oauth|auth|connection|connect|flow|setup|set up|sign-?in)\b/i,
+    /\b(?:set up|setup)\b.*\b(?:oauth|auth|flow|connection|connect|sign-?in)\b/i,
+    /\b(?:open|launch)\b.*\b(?:the )?(?:oauth|auth|sign-?in|connection) (?:flow|page)\b/i,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 function cleanSearchQuery(value: string): string {
   return value
     .replace(/\s+and\s+tell\s+me\s+what\s+you\s+find.*$/i, "")
@@ -1274,6 +2824,208 @@ function cleanSearchQuery(value: string): string {
     .replace(/^who\s+/i, "")
     .replace(/^what\s+/i, "")
     .trim();
+}
+
+function cleanIntegrationProviderQuery(value: string): string {
+  return normalizeIntegrationProviderQuery(
+    value
+    .replace(/\b(?:account|integration|provider|service)\b/gi, "")
+    .replace(/\b(?:connected|set up|linked)\b/gi, "")
+    .replace(/\bto\s+(?:you|nicole)\b/gi, "")
+    .replace(/[?.!]+$/g, "")
+  );
+}
+
+function looksLikeIntegrationProviderQuery(value: string): boolean {
+  return Boolean(resolveIntegrationProviderQuery(value).provider) ||
+    /\b(calendar|gcal|google|zoho|mail|email|gmail|reminder|reminders|apple)\b/i.test(
+      value
+    );
+}
+
+function inferEmailProviderHint(value: string): "gmail" | "zoho_mail" | null {
+  const normalized = value.toLowerCase();
+
+  if (/\bgmail\b|\bgoogle mail\b|\bgoogle email\b/i.test(normalized)) {
+    return "gmail";
+  }
+
+  if (/\bzoho\b|\bzoho mail\b|\bzoho email\b/i.test(normalized)) {
+    return "zoho_mail";
+  }
+
+  return null;
+}
+
+function extractEmailSelection(value: string): string | null {
+  const lowered = value.toLowerCase();
+
+  if (/\b(first|1st)\b/.test(lowered)) return "first";
+  if (/\b(second|2nd)\b/.test(lowered)) return "second";
+  if (/\b(third|3rd)\b/.test(lowered)) return "third";
+  if (/\b(fourth|4th)\b/.test(lowered)) return "fourth";
+  if (/\b(fifth|5th)\b/.test(lowered)) return "fifth";
+  if (/\b(last|latest|newest|most recent)\b/.test(lowered)) return "last";
+  if (/\b(that|it|that one|this one)\b/.test(lowered)) return "that";
+
+  return null;
+}
+
+function extractEmailSenderHint(value: string): string | null {
+  const senderPatterns = [
+    /\b(?:from|to)\s+([a-z][a-z]+(?:\s+[a-z][a-z]+){0,2})\b/i,
+    /\b(?:from|to)\s+([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i,
+    /\bwhat(?:\s+else)?\s+did\s+([a-z][a-z]+(?:\s+[a-z][a-z]+){0,2})\s+say\b/i,
+    /\bwhat\s+did\s+([a-z][a-z]+(?:\s+[a-z][a-z]+){0,2})\s+say\b/i,
+    /\btell me more about\s+([a-z][a-z]+(?:\s+[a-z][a-z]+){0,2})(?:'s)?\s+(?:email|mail|message)\b/i,
+    /\b([a-z][a-z]+(?:\s+[a-z][a-z]+){0,2})(?:'s)?\s+(?:email|mail|message)\b/i,
+  ];
+
+  const senderMatch = senderPatterns
+    .map((pattern) => value.match(pattern))
+    .find((match) => Boolean(match?.[1]));
+
+  if (!senderMatch?.[1]) {
+    return null;
+  }
+
+  return senderMatch[1].trim();
+}
+
+function extractReplyInstructions(value: string): string | null {
+  const sayingMatch = value.match(/\bsaying\s+(.+)$/i);
+  if (sayingMatch?.[1]) {
+    return sayingMatch[1].trim().replace(/[.!?]+$/g, "");
+  }
+
+  const thatSaysMatch = value.match(/\bthat says\s+(.+)$/i);
+  if (thatSaysMatch?.[1]) {
+    return thatSaysMatch[1].trim().replace(/[.!?]+$/g, "");
+  }
+
+  return null;
+}
+
+function normalizeEmailProviderHint(
+  value: string | null
+): "gmail" | "zoho_mail" | null {
+  if (!value) {
+    return null;
+  }
+
+  return inferEmailProviderHint(value);
+}
+
+function extractEmailTimeWindow(value: string): {
+  since: Date | null;
+  until: Date | null;
+} | null {
+  const now = new Date();
+  const lastDaysMatch = value.match(/\b(?:past|last)\s+(\d+)\s+days?\b/i);
+  if (lastDaysMatch) {
+    const days = Number(lastDaysMatch[1]);
+    if (!Number.isNaN(days) && days > 0) {
+      const since = new Date(now);
+      since.setDate(since.getDate() - days);
+      return { since, until: null };
+    }
+  }
+
+  const lastWeeksMatch = value.match(/\b(?:past|last)\s+(\d+)\s+weeks?\b/i);
+  if (lastWeeksMatch) {
+    const weeks = Number(lastWeeksMatch[1]);
+    if (!Number.isNaN(weeks) && weeks > 0) {
+      const since = new Date(now);
+      since.setDate(since.getDate() - weeks * 7);
+      return { since, until: null };
+    }
+  }
+
+  if (/\btoday\b/i.test(value)) {
+    const since = new Date(now);
+    since.setHours(0, 0, 0, 0);
+    return { since, until: null };
+  }
+
+  if (/\byesterday\b/i.test(value)) {
+    const since = new Date(now);
+    since.setDate(since.getDate() - 1);
+    since.setHours(0, 0, 0, 0);
+    const until = new Date(since);
+    until.setDate(until.getDate() + 1);
+    return { since, until };
+  }
+
+  return null;
+}
+
+function buildEmailSearchQuery(options: {
+  provider: "gmail" | "zoho_mail" | null;
+  explicitQuery: string | null;
+  timeWindow: { since: Date | null; until: Date | null } | null;
+}): string | null {
+  const normalizedQuery = options.explicitQuery?.trim() || "";
+
+  if (options.provider === "gmail") {
+    const parts: string[] = [];
+    if (normalizedQuery) {
+      parts.push(normalizedQuery);
+    }
+    if (options.timeWindow?.since) {
+      parts.push(`after:${formatGmailQueryDate(options.timeWindow.since)}`);
+    }
+    if (options.timeWindow?.until) {
+      parts.push(`before:${formatGmailQueryDate(options.timeWindow.until)}`);
+    }
+    return parts.join(" ").trim() || "in:anywhere";
+  }
+
+  if (options.provider === "zoho_mail") {
+    const parts: string[] = [];
+    const dateFilters: string[] = [];
+    if (options.timeWindow?.since) {
+      dateFilters.push(`fromDate:${formatZohoQueryDate(options.timeWindow.since)}`);
+    }
+    if (options.timeWindow?.until) {
+      dateFilters.push(`toDate:${formatZohoQueryDate(options.timeWindow.until)}`);
+    }
+    if (dateFilters.length > 0) {
+      parts.push(dateFilters.join("::"));
+    }
+    if (normalizedQuery) {
+      parts.push(normalizedQuery);
+    }
+    return parts.join("::").trim() || "newMails";
+  }
+
+  return normalizedQuery || null;
+}
+
+function formatGmailQueryDate(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}/${month}/${day}`;
+}
+
+function formatZohoQueryDate(value: Date): string {
+  const day = String(value.getDate()).padStart(2, "0");
+  const month = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ][value.getMonth()];
+  const year = value.getFullYear();
+  return `${day}-${month}-${year}`;
 }
 
 interface WebSearchToolOutput {
@@ -1289,6 +3041,205 @@ interface WebSearchToolOutput {
     url?: string;
     content?: string;
   }>;
+}
+
+interface IntegrationToolOutput {
+  ok?: boolean;
+  action?: "status" | "connect" | "disconnect";
+  provider?: {
+    title?: string;
+    connected?: boolean;
+    configured?: boolean;
+    status?: "ready" | "planned";
+    account?: {
+      email?: string | null;
+      displayName?: string | null;
+    } | null;
+  } | null;
+  message?: string;
+  connectUrl?: string | null;
+  browserOpened?: boolean;
+  browserOpenError?: string | null;
+  unsupportedService?: string | null;
+  suggestions?: string[];
+  allProviders?: Array<{
+    title?: string;
+    connected?: boolean;
+    configured?: boolean;
+    status?: "ready" | "planned";
+  }>;
+}
+
+function formatEmailToolResult(result: ToolExecutionResult): string {
+  if (!result.ok) {
+    return `Tool ${result.name} failed.\nError: ${result.error}`;
+  }
+
+  const output = (result.output || {}) as Record<string, any>;
+
+  if (result.name === "email_search") {
+    const provider = output.provider || "email";
+    const results = Array.isArray(output.results) ? output.results : [];
+    if (results.length === 0) {
+      return `Tool email_search provider: ${provider}\nResults: 0\nCRITICAL: Tell Roy there were no matching emails.`;
+    }
+
+    const lines = results.map((item, index) =>
+      [
+        `${index + 1}. ${item.subject || "(no subject)"}`,
+        item.sender || item.fromAddress
+          ? `   From: ${item.sender || item.fromAddress}`
+          : null,
+        item.receivedAt ? `   Received: ${item.receivedAt}` : null,
+        item.id ? `   Message ID: ${item.id}` : null,
+        item.threadId ? `   Thread ID: ${item.threadId}` : null,
+        item.summary ? `   Summary: ${item.summary}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    );
+
+    return `Tool email_search provider: ${provider}\n${lines.join(
+      "\n\n"
+    )}\nCRITICAL: These are real email search results. Use them instead of inventing inbox contents.`;
+  }
+
+  if (result.name === "email_read") {
+    const message = output.message || {};
+    return `Tool email_read provider: ${output.provider || "email"}\nSubject: ${
+      message.subject || "(no subject)"
+    }\nFrom: ${message.sender || message.fromAddress || "unknown"}\nTo: ${
+      Array.isArray(message.toAddresses) ? message.toAddresses.join(", ") : ""
+    }\nReceived: ${message.receivedAt || "unknown"}\nMessage ID: ${
+      message.id || "unknown"
+    }\nThread ID: ${message.threadId || "none"}\nBody:\n${
+      message.bodyText || message.summary || "(no readable body)"
+    }\nCRITICAL: This is the actual email content that was loaded.`;
+  }
+
+  if (result.name === "email_thread_read") {
+    const messages = Array.isArray(output.messages) ? output.messages : [];
+    const lines = messages.map((message, index) =>
+      [
+        `${index + 1}. ${message.subject || "(no subject)"}`,
+        message.sender || message.fromAddress
+          ? `   From: ${message.sender || message.fromAddress}`
+          : null,
+        message.receivedAt ? `   Received: ${message.receivedAt}` : null,
+        message.bodyText
+          ? `   Body: ${String(message.bodyText).slice(0, 800)}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    );
+
+    return `Tool email_thread_read provider: ${output.provider || "email"}\nThread ID: ${
+      output.threadId || "unknown"
+    }\nMessages:\n${lines.join("\n\n")}${
+      output.note ? `\nNote: ${output.note}` : ""
+    }\nCRITICAL: This is the actual email thread content that was loaded.`;
+  }
+
+  if (result.name === "email_reply_draft") {
+    const draft = output.draft || {};
+    const target = output.target || {};
+    return `Tool email_reply_draft provider: ${output.provider || "email"}\nTarget subject: ${
+      target.subject || "(no subject)"
+    }\nReply to: ${draft.to || target.fromAddress || "unknown"}\nDraft subject: ${
+      draft.subject || "(no subject)"
+    }\nDraft body:\n${
+      draft.body || "(empty draft)"
+    }\nCRITICAL: This draft was generated from a real email. Present it as a draft, not as already sent.`;
+  }
+
+  if (result.name === "email_reply_send") {
+    return `Tool email_reply_send provider: ${output.provider || "email"}\nStatus: ${
+      output.status || "sent"
+    }\nMessage ID: ${
+      output.messageId || "unknown"
+    }\nCRITICAL: Tell Roy the reply has been sent.`;
+  }
+
+  return `Tool ${result.name} returned:\n${JSON.stringify(result.output, null, 2)}`;
+}
+
+function formatIntegrationToolResult(result: ToolExecutionResult): string {
+  if (!result.ok) {
+    return `Tool ${result.name} failed.\nError: ${result.error}`;
+  }
+
+  const output = asIntegrationToolOutput(result.output);
+  if (output?.ok === false) {
+    const suggestions =
+      output.suggestions && output.suggestions.length > 0
+        ? `\nSuggestions: ${output.suggestions.join(", ")}`
+        : "";
+    return `Tool ${result.name} status: blocked\nMessage: ${
+      output.message || "The integration request could not be completed."
+    }${suggestions}\nCRITICAL: Tell Roy exactly what is or isn't supported.`;
+  }
+
+  const providerTitle = output?.provider?.title || "integration";
+  const accountLabel =
+    output?.provider?.account?.email ||
+    output?.provider?.account?.displayName ||
+    null;
+
+  if (result.name === "integration_connect") {
+    return `Tool integration_connect status: ${
+      output?.provider?.connected ? "already_connected" : "auth_started"
+    }\nProvider: ${providerTitle}\nMessage: ${output?.message || "Connection flow prepared."}\nBrowser opened: ${
+      output?.browserOpened ? "yes" : "no"
+    }${
+      output?.connectUrl ? `\nConnect URL: ${output.connectUrl}` : ""
+    }${
+      output?.browserOpenError ? `\nBrowser launch issue: ${output.browserOpenError}` : ""
+    }\nCRITICAL: If the browser was opened, tell Roy to finish the sign-in there. If it was not opened but a connect URL exists, give him that URL plainly.`;
+  }
+
+  if (result.name === "integration_disconnect") {
+    return `Tool integration_disconnect status: done\nProvider: ${providerTitle}\nMessage: ${
+      output?.message || `${providerTitle} disconnected.`
+    }\nCRITICAL: Tell Roy the provider is disconnected now.`;
+  }
+
+  if (Array.isArray(output?.allProviders) && output.allProviders.length > 0) {
+    const lines = output.allProviders.map((provider) => {
+      const state =
+        provider.status === "planned"
+          ? "planned"
+          : provider.connected
+            ? "connected"
+            : provider.configured
+              ? "available_not_connected"
+              : "not_configured";
+      return `- ${provider.title || "Unknown"}: ${state}`;
+    });
+
+    return `Tool integration_status snapshot:\n${lines.join("\n")}\nCRITICAL: Report these integration states directly.`;
+  }
+
+  return `Tool integration_status provider: ${providerTitle}\nConnected: ${
+    output?.provider?.connected ? "yes" : "no"
+  }\nConfigured: ${output?.provider?.configured ? "yes" : "no"}\nStatus: ${
+    output?.provider?.status || "unknown"
+  }${accountLabel ? `\nAccount: ${accountLabel}` : ""}\nMessage: ${
+    output?.message || "No integration status message."
+  }\nCRITICAL: Report this provider state directly.`;
+}
+
+function formatWeatherToolResult(result: ToolExecutionResult): string {
+  if (!result.ok) {
+    return `Weather check failed: ${result.error || "Could not fetch weather data."}`;
+  }
+
+  const output = result.output as { formatted?: string };
+  if (output?.formatted) {
+    return `Weather data (live):\n${output.formatted}\n\nPresent this naturally. Don't list raw numbers — summarize conversationally.`;
+  }
+
+  return `Tool weather_get returned:\n${JSON.stringify(result.output, null, 2)}`;
 }
 
 function formatWebSearchToolResult(result: ToolExecutionResult): string {
@@ -1357,6 +3308,14 @@ function asWebSearchToolOutput(value: unknown): WebSearchToolOutput | null {
   return value as WebSearchToolOutput;
 }
 
+function asIntegrationToolOutput(value: unknown): IntegrationToolOutput | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return value as IntegrationToolOutput;
+}
+
 function extractLikelyProperNounQuery(content: string): string | null {
   const match = content.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b/);
 
@@ -1385,19 +3344,201 @@ function parseGitStatusToolCall(message: string): ToolCall | null {
   return null;
 }
 
+function parseEmailFollowUpToolCall(message: string): ToolCall | null {
+  const sender = extractEmailSenderHint(message);
+  const selection = extractEmailSelection(message);
+  const provider = inferEmailProviderHint(message);
+
+  const asksForMoreFromSender =
+    /\bwhat(?:\s+else)?\s+did\b/i.test(message) && /\bsay\b/i.test(message);
+  const asksForMoreFromEmail =
+    /\btell me more about\b/i.test(message) ||
+    /\bwhat(?:'s| is| else is)\s+in\b/i.test(message);
+  const wantsThread = /\b(?:thread|conversation)\b/i.test(message);
+
+  if (!asksForMoreFromSender && !asksForMoreFromEmail) {
+    return null;
+  }
+
+  if (!sender && !selection) {
+    return null;
+  }
+
+  return {
+    name: wantsThread ? "email_thread_read" : "email_read",
+    arguments: {
+      ...(sender ? { sender } : {}),
+      ...(selection ? { selection } : {}),
+      ...(provider ? { provider } : {}),
+    },
+  };
+}
+
 function parseEmailSearchToolCall(message: string): ToolCall | null {
+  const provider = inferEmailProviderHint(message);
+  const timeWindow = extractEmailTimeWindow(message);
   const match =
     message.match(/^(?:search|find)\s+(?:my\s+)?email(?:s)?\s+(?:for|about)\s+(.+)$/i) ||
     message.match(/^(?:search|find)\s+emails?\s+from\s+(.+)$/i);
 
-  if (!match) {
+  if (match) {
+    const query = buildEmailSearchQuery({
+      provider,
+      explicitQuery: match[1].trim(),
+      timeWindow,
+    });
+
+    if (!query) {
+      return null;
+    }
+
+    return {
+      name: "email_search",
+      arguments: {
+        query,
+        ...(provider ? { provider } : {}),
+      },
+    };
+  }
+
+  const looksLikeNaturalEmailCheck =
+    /\b(?:mail|emails?|inbox)\b/i.test(message) &&
+    (/\b(?:check|scan|look(?:\s+through|\s+in)?|see|show)\b/i.test(message) ||
+      /\bdo i have\b/i.test(message) ||
+      /\bany emails?\b/i.test(message));
+
+  if (!looksLikeNaturalEmailCheck) {
+    return null;
+  }
+
+  const query = buildEmailSearchQuery({
+    provider,
+    explicitQuery: null,
+    timeWindow,
+  });
+
+  if (!query) {
     return null;
   }
 
   return {
     name: "email_search",
     arguments: {
-      query: match[1].trim(),
+      query,
+      ...(provider ? { provider } : {}),
+    },
+  };
+}
+
+function parseEmailThreadReadToolCall(message: string): ToolCall | null {
+  if (!/\b(?:thread|conversation)\b/i.test(message)) {
+    return null;
+  }
+
+  if (!/\b(?:read|open|show|pull up|load|check)\b/i.test(message)) {
+    return null;
+  }
+
+  const selection = extractEmailSelection(message);
+  const sender = extractEmailSenderHint(message);
+  const provider = inferEmailProviderHint(message);
+
+  return {
+    name: "email_thread_read",
+    arguments: {
+      ...(selection ? { selection } : {}),
+      ...(sender ? { sender } : {}),
+      ...(provider ? { provider } : {}),
+    },
+  };
+}
+
+function parseEmailReadToolCall(message: string): ToolCall | null {
+  if (!/\b(?:read|open|show|pull up|load|check)\b/i.test(message)) {
+    return null;
+  }
+
+  if (
+    !/\b(?:email|mail|message|one|it|that|latest|last|first|second|third|fourth|fifth)\b/i.test(
+      message
+    )
+  ) {
+    return null;
+  }
+
+  if (/\b(?:thread|conversation)\b/i.test(message)) {
+    return null;
+  }
+
+  const selection = extractEmailSelection(message);
+  const sender = extractEmailSenderHint(message);
+  const provider = inferEmailProviderHint(message);
+
+  if (!selection && !sender && !/\b(?:email|mail|message)\b/i.test(message)) {
+    return null;
+  }
+
+  return {
+    name: "email_read",
+    arguments: {
+      ...(selection ? { selection } : {}),
+      ...(sender ? { sender } : {}),
+      ...(provider ? { provider } : {}),
+    },
+  };
+}
+
+function parseEmailReplyDraftToolCall(message: string): ToolCall | null {
+  if (!/\b(?:draft|write|compose|prepare)\b/i.test(message)) {
+    return null;
+  }
+
+  if (!/\breply\b/i.test(message)) {
+    return null;
+  }
+
+  const selection = extractEmailSelection(message);
+  const sender = extractEmailSenderHint(message);
+  const provider = inferEmailProviderHint(message);
+  const instructions = extractReplyInstructions(message);
+
+  return {
+    name: "email_reply_draft",
+    arguments: {
+      ...(selection ? { selection } : {}),
+      ...(sender ? { sender } : {}),
+      ...(provider ? { provider } : {}),
+      ...(instructions ? { instructions } : {}),
+    },
+  };
+}
+
+function parseEmailReplySendToolCall(message: string): ToolCall | null {
+  const isExplicitSend =
+    /\b(?:send|ship)\b/i.test(message) && /\breply\b/i.test(message);
+  const isSendPronoun =
+    /^(?:please\s+)?send\s+(?:it|that|the reply|this reply)[.!?]*$/i.test(
+      message
+    );
+  const isDirectReply =
+    /^(?:please\s+)?reply\s+to\b/i.test(message) && /\bsaying\b/i.test(message);
+
+  if (!isExplicitSend && !isSendPronoun && !isDirectReply) {
+    return null;
+  }
+
+  const selection = extractEmailSelection(message);
+  const sender = extractEmailSenderHint(message);
+  const provider = inferEmailProviderHint(message);
+  const instructions = extractReplyInstructions(message);
+
+  return {
+    name: "email_reply_send",
+    arguments: {
+      ...(selection ? { selection } : {}),
+      ...(sender ? { sender } : {}),
+      ...(provider ? { provider } : {}),
+      ...(instructions ? { body: instructions } : {}),
     },
   };
 }
@@ -1546,6 +3687,397 @@ function startOfWeek(date: Date): Date {
   const diff = day === 0 ? -6 : 1 - day;
   result.setDate(result.getDate() + diff);
   return result;
+}
+
+interface EmailReference {
+  provider: "gmail" | "zoho_mail";
+  id: string;
+  threadId: string | null;
+  folderId: string | null;
+  subject: string | null;
+  fromAddress: string | null;
+  sender: string | null;
+}
+
+interface EmailMessageContext extends EmailReference {
+  receivedAt: string | null;
+  bodyText: string | null;
+  summary: string | null;
+  toAddresses: string[];
+  ccAddresses: string[];
+  messageIdHeader: string | null;
+  references: string | null;
+}
+
+async function resolveEmailReference(
+  input: Record<string, unknown>
+): Promise<EmailReference | null> {
+  const providerHint = normalizeEmailProviderHint(
+    readOptionalString(input, "provider")
+  );
+  const explicitMessageId = readOptionalString(input, "messageId");
+  const selection = readOptionalString(input, "selection");
+  const senderHint = readOptionalString(input, "sender");
+
+  const lastRead = await getLatestSuccessfulEmailToolOutput(
+    "email_read",
+    providerHint
+  );
+  const lastReadMessage = asEmailReadOutput(lastRead?.output)?.message || null;
+
+  if (explicitMessageId) {
+    if (lastReadMessage?.id === explicitMessageId) {
+      return emailReferenceFromMessage(lastReadMessage, providerHint || lastRead?.provider || null);
+    }
+
+    const lastSearch = await getLatestSuccessfulEmailToolOutput(
+      "email_search",
+      providerHint
+    );
+    const searchOutput = asEmailSearchOutput(lastSearch?.output);
+    const results = Array.isArray(searchOutput?.results) ? searchOutput.results : [];
+    const exact = results.find((item) => item.id === explicitMessageId);
+    if (exact) {
+      return emailReferenceFromResult(exact, providerHint || lastSearch?.provider || null);
+    }
+  }
+
+  if (selection && /^(that|it|this|that one)$/i.test(selection) && lastReadMessage) {
+    return emailReferenceFromMessage(
+      lastReadMessage,
+      providerHint || lastRead?.provider || null
+    );
+  }
+
+  const lastSearch = await getLatestSuccessfulEmailToolOutput(
+    "email_search",
+    providerHint
+  );
+  const searchOutput = asEmailSearchOutput(lastSearch?.output);
+  const results = Array.isArray(searchOutput?.results) ? searchOutput.results : [];
+  const candidateProvider = providerHint || lastSearch?.provider || lastRead?.provider || null;
+
+  if (senderHint && results.length > 0) {
+    const match = results.find((item) =>
+      `${item.sender || ""} ${item.fromAddress || ""}`
+        .toLowerCase()
+        .includes(senderHint.toLowerCase())
+    );
+    if (match) {
+      return emailReferenceFromResult(match, candidateProvider);
+    }
+  }
+
+  const selectionIndex = selectionToIndex(selection);
+  if (selectionIndex !== null && results[selectionIndex]) {
+    return emailReferenceFromResult(results[selectionIndex], candidateProvider);
+  }
+
+  if (selection && selection.toLowerCase() === "last" && results.length > 0) {
+    return emailReferenceFromResult(results[results.length - 1], candidateProvider);
+  }
+
+  if (results.length === 1) {
+    return emailReferenceFromResult(results[0], candidateProvider);
+  }
+
+  if (!selection && !senderHint && lastReadMessage) {
+    return emailReferenceFromMessage(
+      lastReadMessage,
+      candidateProvider
+    );
+  }
+
+  return null;
+}
+
+async function loadEmailMessageForReference(
+  reference: EmailReference
+): Promise<EmailMessageContext | null> {
+  if (reference.provider === "gmail") {
+    const message = await readGmailMessage({ messageId: reference.id });
+    if (!message) {
+      return null;
+    }
+
+    return {
+      provider: "gmail",
+      id: message.id,
+      threadId: message.threadId || null,
+      folderId: null,
+      subject: message.subject,
+      fromAddress: message.fromAddress,
+      sender: message.sender,
+      receivedAt: message.receivedAt,
+      bodyText: message.bodyText,
+      summary: message.summary,
+      toAddresses: message.toAddresses,
+      ccAddresses: message.ccAddresses,
+      messageIdHeader: message.messageIdHeader,
+      references: message.references,
+    };
+  }
+
+  const message = await readZohoMailMessage({
+    messageId: reference.id,
+    folderId: reference.folderId,
+  });
+  if (!message) {
+    return null;
+  }
+
+  return {
+    provider: "zoho_mail",
+    id: message.id,
+    threadId: message.threadId || null,
+    folderId: message.folderId || null,
+    subject: message.subject,
+    fromAddress: message.fromAddress,
+    sender: message.sender,
+    receivedAt: message.receivedAt,
+    bodyText: message.bodyText,
+    summary: message.summary,
+    toAddresses: message.toAddresses,
+    ccAddresses: message.ccAddresses,
+    messageIdHeader: message.messageIdHeader,
+    references: message.references,
+  };
+}
+
+async function draftReplyFromEmail(
+  message: EmailMessageContext,
+  instructions: string
+) {
+  const response = await chat(
+    [
+      {
+        role: "system",
+        content:
+          "You draft concise, professional email replies. Return only compact JSON with keys subject and body. No markdown, no code fences, no explanation.",
+      },
+      {
+        role: "user",
+        content: [
+          `Original subject: ${message.subject || "(no subject)"}`,
+          `From: ${message.sender || message.fromAddress || "unknown"}`,
+          `Received: ${message.receivedAt || "unknown"}`,
+          `Original body: ${(message.bodyText || message.summary || "").slice(0, 4000)}`,
+          `Instructions: ${instructions}`,
+        ].join("\n"),
+      },
+    ],
+    {
+      temperature: 0.2,
+      maxTokens: 500,
+    }
+  );
+
+  const text = typeof response === "string" ? response.trim() : "";
+  const parsed = parseDraftReplyJson(text);
+  if (parsed) {
+    return parsed;
+  }
+
+  return {
+    subject: ensureReplySubjectLine(message.subject || "(no subject)"),
+    body: text || "Thanks. I'll get back to you shortly.",
+  };
+}
+
+async function getLatestSuccessfulEmailToolOutput(
+  toolName: string,
+  providerHint: "gmail" | "zoho_mail" | null
+) {
+  const rows = await db
+    .select({
+      toolName: toolInvocations.toolName,
+      output: toolInvocations.output,
+      createdAt: toolInvocations.createdAt,
+    })
+    .from(toolInvocations)
+    .where(eq(toolInvocations.status, "success"))
+    .orderBy(desc(toolInvocations.createdAt))
+    .limit(20);
+
+  for (const row of rows) {
+    if (row.toolName !== toolName) {
+      continue;
+    }
+
+    const provider = extractEmailProviderFromOutput(row.output);
+    if (providerHint && provider && provider !== providerHint) {
+      continue;
+    }
+
+    return {
+      ...row,
+      provider,
+    };
+  }
+
+  return null;
+}
+
+async function getLatestEmailReplyDraftOutput(
+  providerHint: "gmail" | "zoho_mail" | null
+) {
+  const row = await getLatestSuccessfulEmailToolOutput(
+    "email_reply_draft",
+    providerHint
+  );
+
+  return asEmailReplyDraftOutput(row?.output);
+}
+
+function extractEmailProviderFromOutput(output: unknown): "gmail" | "zoho_mail" | null {
+  if (!output || typeof output !== "object") {
+    return null;
+  }
+
+  const provider = (output as Record<string, unknown>).provider;
+  return provider === "gmail" || provider === "zoho_mail" ? provider : null;
+}
+
+function selectionToIndex(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  switch (value.toLowerCase()) {
+    case "first":
+      return 0;
+    case "second":
+      return 1;
+    case "third":
+      return 2;
+    case "fourth":
+      return 3;
+    case "fifth":
+      return 4;
+    default:
+      return null;
+  }
+}
+
+function emailReferenceFromResult(
+  result: Record<string, any>,
+  provider: "gmail" | "zoho_mail" | null
+): EmailReference | null {
+  if (!provider || typeof result.id !== "string") {
+    return null;
+  }
+
+  return {
+    provider,
+    id: result.id,
+    threadId: typeof result.threadId === "string" ? result.threadId : null,
+    folderId: typeof result.folderId === "string" ? result.folderId : null,
+    subject: typeof result.subject === "string" ? result.subject : null,
+    fromAddress:
+      typeof result.fromAddress === "string" ? result.fromAddress : null,
+    sender: typeof result.sender === "string" ? result.sender : null,
+  };
+}
+
+function emailReferenceFromMessage(
+  message: Record<string, any>,
+  provider: "gmail" | "zoho_mail" | null
+): EmailReference | null {
+  if (!provider || typeof message.id !== "string") {
+    return null;
+  }
+
+  return {
+    provider,
+    id: message.id,
+    threadId: typeof message.threadId === "string" ? message.threadId : null,
+    folderId: typeof message.folderId === "string" ? message.folderId : null,
+    subject: typeof message.subject === "string" ? message.subject : null,
+    fromAddress:
+      typeof message.fromAddress === "string" ? message.fromAddress : null,
+    sender: typeof message.sender === "string" ? message.sender : null,
+  };
+}
+
+function asEmailSearchOutput(output: unknown):
+  | { provider?: string; results?: Record<string, any>[] }
+  | null {
+  return output && typeof output === "object"
+    ? (output as { provider?: string; results?: Record<string, any>[] })
+    : null;
+}
+
+function asEmailReadOutput(output: unknown):
+  | { provider?: string; message?: Record<string, any> }
+  | null {
+  return output && typeof output === "object"
+    ? (output as { provider?: string; message?: Record<string, any> })
+    : null;
+}
+
+function asEmailReplyDraftOutput(output: unknown):
+  | {
+      provider?: "gmail" | "zoho_mail";
+      draft?: {
+        to?: string | null;
+        subject?: string | null;
+        body?: string | null;
+        cc?: string | null;
+        originalMessageId?: string | null;
+        threadId?: string | null;
+        messageIdHeader?: string | null;
+        references?: string | null;
+      };
+    }
+  | null {
+  return output && typeof output === "object"
+    ? (output as {
+        provider?: "gmail" | "zoho_mail";
+        draft?: {
+          to?: string | null;
+          subject?: string | null;
+          body?: string | null;
+          cc?: string | null;
+          originalMessageId?: string | null;
+          threadId?: string | null;
+          messageIdHeader?: string | null;
+          references?: string | null;
+        };
+      })
+    : null;
+}
+
+function parseDraftReplyJson(value: string) {
+  const jsonMatch = value.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as {
+      subject?: unknown;
+      body?: unknown;
+    };
+    if (
+      typeof parsed.subject === "string" &&
+      parsed.subject.trim().length > 0 &&
+      typeof parsed.body === "string" &&
+      parsed.body.trim().length > 0
+    ) {
+      return {
+        subject: parsed.subject.trim(),
+        body: parsed.body.trim(),
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function ensureReplySubjectLine(value: string) {
+  return /^re:/i.test(value.trim()) ? value.trim() : `Re: ${value.trim()}`;
 }
 
 function coerceDateTime(value: string | null): Date | null {
