@@ -2,6 +2,10 @@ import Foundation
 
 @MainActor
 final class ChatViewModel: ObservableObject {
+  enum SessionScope: String {
+    case mobile
+  }
+
   enum ConnectionState {
     case idle
     case connecting
@@ -226,7 +230,8 @@ final class ChatViewModel: ObservableObject {
         baseURLString: baseURLString,
         message: message,
         assistantID: assistantID,
-        context: context
+        context: context,
+        sessionScope: .mobile
       )
     }
 
@@ -237,13 +242,15 @@ final class ChatViewModel: ObservableObject {
     baseURLString: String,
     message: String,
     assistantID: String,
-    context: NicoleWorkspaceContextPayload
+    context: NicoleWorkspaceContextPayload,
+    sessionScope: SessionScope
   ) async {
     do {
       try await apiClient.streamReply(
         baseURLString: baseURLString,
         message: message,
         context: context,
+        sessionId: sessionScope.rawValue,
         credentials: trustedDeviceCredentials
       ) { [weak self] chunk in
         await self?.appendAssistantChunk(chunk, assistantID: assistantID)

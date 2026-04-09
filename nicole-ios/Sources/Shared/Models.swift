@@ -121,6 +121,7 @@ extension NicoleWorkspaceContextPayload {
 struct NicoleChatRequestBody: Encodable, Sendable {
   let message: String
   let context: NicoleWorkspaceContextPayload?
+  let sessionId: String?
 }
 
 struct NicoleIngestResult: Decodable, Sendable {
