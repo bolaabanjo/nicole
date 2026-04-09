@@ -15,6 +15,9 @@ struct NicoleMessage: Identifiable, Equatable, Sendable {
   var thoughtContent: String?
   var isThoughtOpen: Bool
   var thoughtDuration: Int?
+  var preActionText: String?
+  var liveStatusText: String?
+  var activityItems: [NicoleActivityItem]
 
   init(
     id: String = UUID().uuidString,
@@ -24,7 +27,10 @@ struct NicoleMessage: Identifiable, Equatable, Sendable {
     isStreaming: Bool = false,
     thoughtContent: String? = nil,
     isThoughtOpen: Bool = false,
-    thoughtDuration: Int? = nil
+    thoughtDuration: Int? = nil,
+    preActionText: String? = nil,
+    liveStatusText: String? = nil,
+    activityItems: [NicoleActivityItem] = []
   ) {
     self.id = id
     self.role = role
@@ -34,6 +40,19 @@ struct NicoleMessage: Identifiable, Equatable, Sendable {
     self.thoughtContent = thoughtContent
     self.isThoughtOpen = isThoughtOpen
     self.thoughtDuration = thoughtDuration
+    self.preActionText = preActionText
+    self.liveStatusText = liveStatusText
+    self.activityItems = activityItems
+  }
+}
+
+struct NicoleActivityItem: Identifiable, Equatable, Sendable {
+  let id: String
+  let text: String
+
+  init(id: String = UUID().uuidString, text: String) {
+    self.id = id
+    self.text = text
   }
 }
 
@@ -161,11 +180,64 @@ extension NicoleWorkspaceContextPayload {
 struct NicoleChatRequestBody: Encodable, Sendable {
   let message: String
   let context: NicoleWorkspaceContextPayload?
+  let sessionId: String?
   var voice: Bool?
+  var eventStream: Bool?
 }
 
 struct NicoleVoiceRequestBody: Encodable, Sendable {
   let message: String
+  let sessionId: String?
+  let surface: String?
+  let voiceTurnId: String?
+  let interruptedVoiceTurnId: String?
+  let context: NicoleWorkspaceContextPayload?
+}
+
+struct NicoleVoicePrepareRequestBody: Encodable, Sendable {
+  let transcript: String
+  let sessionId: String?
+  let surface: String?
+  let isFinal: Bool
+  let voiceTurnId: String?
+  let interruptedVoiceTurnId: String?
+  let context: NicoleWorkspaceContextPayload?
+}
+
+struct NicoleVoiceWarmRequestBody: Encodable, Sendable {
+  let sessionId: String?
+  let surface: String?
+  let context: NicoleWorkspaceContextPayload?
+}
+
+struct NicoleVoicePreparedTurn: Decodable, Equatable, Sendable {
+  let voiceTurnId: String
+  let intentClass: String
+  let topicKind: String?
+  let ackPolicy: String
+  let deterministicMode: Bool
+  let preActionText: String?
+  let statusText: String?
+  let toolPlan: [String]
+  let replyToTurnId: String?
+  let groundedArtifactIds: [String]
+  let interruptedByTurnId: String?
+  let isFinal: Bool
+  let latency: NicoleVoicePrepareLatency?
+}
+
+struct NicoleVoicePrepareLatency: Codable, Equatable, Sendable {
+  let totalMilliseconds: Double
+  let authMilliseconds: Double
+  let contextMilliseconds: Double
+  let planMilliseconds: Double
+}
+
+struct NicoleLatencyMetric: Codable, Equatable, Sendable {
+  let key: String
+  let milliseconds: Double
+  let sinceStartMilliseconds: Double?
+  let detail: String?
 }
 
 struct NicoleVisionRequestBody: Encodable, Sendable {
@@ -185,6 +257,25 @@ struct NicoleVisionAnalysis: Codable, Equatable, Sendable {
 
 struct NicoleVisionAnalysisResponse: Decodable, Sendable {
   let analysis: NicoleVisionAnalysis
+}
+
+enum NicoleStreamEventType: String, Decodable, Sendable {
+  case preface
+  case status
+  case tool
+  case activity
+  case latency
+  case text
+  case textDelta = "text_delta"
+  case speechBoundary = "speech_boundary"
+  case done
+  case error
+}
+
+struct NicoleStreamEventEnvelope: Decodable, Sendable {
+  let type: NicoleStreamEventType
+  let text: String
+  let metric: NicoleLatencyMetric?
 }
 
 struct NicoleIngestResult: Decodable, Sendable {

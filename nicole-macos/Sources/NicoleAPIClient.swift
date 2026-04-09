@@ -70,12 +70,91 @@ actor NicoleAPIClient {
     ).url?.absoluteString ?? ""
   }
 
-  func streamVoiceReply(
+  func voicePrepareURLString(baseURLString: String) throws -> String {
+    try makeRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/voice/prepare",
+      method: "POST"
+    ).url?.absoluteString ?? ""
+  }
+
+  func voiceWarmURLString(baseURLString: String) throws -> String {
+    try makeRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/voice/warm",
+      method: "POST"
+    ).url?.absoluteString ?? ""
+  }
+
+  func warmVoiceRuntime(
+    baseURLString: String,
+    sessionId: String? = nil,
+    surface: String? = nil,
+    context: NicoleWorkspaceContextPayload? = nil
+  ) async throws {
+    let body = NicoleVoiceWarmRequestBody(
+      sessionId: sessionId,
+      surface: surface,
+      context: context
+    )
+    let request = try makeJSONRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/voice/warm",
+      body: body
+    )
+
+    let (_, response) = try await session.data(for: request)
+    try validate(response: response, data: nil, requestURL: request.url?.absoluteString)
+  }
+
+  func prepareVoiceTurn(
+    baseURLString: String,
+    transcript: String,
+    sessionId: String? = nil,
+    surface: String? = nil,
+    isFinal: Bool,
+    voiceTurnId: String? = nil,
+    interruptedVoiceTurnId: String? = nil,
+    context: NicoleWorkspaceContextPayload? = nil
+  ) async throws -> NicoleVoicePreparedTurn {
+    let body = NicoleVoicePrepareRequestBody(
+      transcript: transcript,
+      sessionId: sessionId,
+      surface: surface,
+      isFinal: isFinal,
+      voiceTurnId: voiceTurnId,
+      interruptedVoiceTurnId: interruptedVoiceTurnId,
+      context: context
+    )
+    let request = try makeJSONRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/voice/prepare",
+      body: body
+    )
+
+    let (data, response) = try await session.data(for: request)
+    try validate(response: response, data: data, requestURL: request.url?.absoluteString)
+    return try JSONDecoder().decode(NicoleVoicePreparedTurn.self, from: data)
+  }
+
+  func streamVoiceReplyEvents(
     baseURLString: String,
     message: String,
-    onChunk: @escaping @Sendable (String) async -> Void
+    context: NicoleWorkspaceContextPayload? = nil,
+    sessionId: String? = nil,
+    surface: String? = nil,
+    voiceTurnId: String? = nil,
+    interruptedVoiceTurnId: String? = nil,
+    onEvent: @escaping @Sendable (NicoleStreamEventEnvelope) async -> Void
   ) async throws {
-    let body = NicoleVoiceRequestBody(message: message)
+    let body = NicoleVoiceRequestBody(
+      message: message,
+      sessionId: sessionId,
+      surface: surface,
+      voiceTurnId: voiceTurnId,
+      interruptedVoiceTurnId: interruptedVoiceTurnId,
+      context: context
+    )
     let request = try makeJSONRequest(
       baseURLString: baseURLString,
       path: "/api/nicole/voice",
@@ -84,24 +163,7 @@ actor NicoleAPIClient {
 
     let (bytes, response) = try await session.bytes(for: request)
     try validate(response: response, data: nil, requestURL: request.url?.absoluteString)
-
-    var buffer = Data()
-
-    for try await byte in bytes {
-      buffer.append(byte)
-
-      if let fragment = String(data: buffer, encoding: .utf8), !fragment.isEmpty {
-        await onChunk(fragment)
-        buffer.removeAll(keepingCapacity: true)
-      }
-    }
-
-    if !buffer.isEmpty {
-      let fragment = String(decoding: buffer, as: UTF8.self)
-      if !fragment.isEmpty {
-        await onChunk(fragment)
-      }
-    }
+    try await streamEventLines(bytes: bytes, onEvent: onEvent)
   }
 
   func ingestURLString(baseURLString: String) throws -> String {
@@ -116,10 +178,17 @@ actor NicoleAPIClient {
     baseURLString: String,
     message: String,
     context: NicoleWorkspaceContextPayload?,
+    sessionId: String? = nil,
     voice: Bool = false,
     onChunk: @escaping @Sendable (String) async -> Void
   ) async throws {
-    let body = NicoleChatRequestBody(message: message, context: context, voice: voice ? true : nil)
+    let body = NicoleChatRequestBody(
+      message: message,
+      context: context,
+      sessionId: sessionId,
+      voice: voice ? true : nil,
+      eventStream: nil
+    )
     let request = try makeJSONRequest(
       baseURLString: baseURLString,
       path: "/api/nicole/stream",
@@ -146,6 +215,31 @@ actor NicoleAPIClient {
         await onChunk(fragment)
       }
     }
+  }
+
+  func streamReplyEvents(
+    baseURLString: String,
+    message: String,
+    context: NicoleWorkspaceContextPayload?,
+    sessionId: String? = nil,
+    onEvent: @escaping @Sendable (NicoleStreamEventEnvelope) async -> Void
+  ) async throws {
+    let body = NicoleChatRequestBody(
+      message: message,
+      context: context,
+      sessionId: sessionId,
+      voice: nil,
+      eventStream: true
+    )
+    let request = try makeJSONRequest(
+      baseURLString: baseURLString,
+      path: "/api/nicole/stream",
+      body: body
+    )
+
+    let (bytes, response) = try await session.bytes(for: request)
+    try validate(response: response, data: nil, requestURL: request.url?.absoluteString)
+    try await streamEventLines(bytes: bytes, onEvent: onEvent)
   }
 
   func analyzeVision(
@@ -249,6 +343,27 @@ actor NicoleAPIClient {
     return request
   }
 
+  private func streamEventLines(
+    bytes: URLSession.AsyncBytes,
+    onEvent: @escaping @Sendable (NicoleStreamEventEnvelope) async -> Void
+  ) async throws {
+    let decoder = JSONDecoder()
+
+    for try await line in bytes.lines {
+      let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { continue }
+      guard let data = trimmed.data(using: .utf8) else { continue }
+
+      do {
+        let event = try decoder.decode(NicoleStreamEventEnvelope.self, from: data)
+        await onEvent(event)
+      } catch {
+        let fallback = NicoleStreamEventEnvelope(type: .textDelta, text: trimmed, metric: nil)
+        await onEvent(fallback)
+      }
+    }
+  }
+
   private func makeMultipartBody(
     fields: [(String, String)],
     fileField: (name: String, filename: String, mimeType: String, data: Data)? = nil
@@ -292,6 +407,7 @@ actor NicoleAPIClient {
     var request = URLRequest(url: url)
     request.httpMethod = method
     request.timeoutInterval = 90
+    request.setValue("macos", forHTTPHeaderField: "x-nicole-client-surface")
     return request
   }
 

@@ -2,6 +2,12 @@ import Foundation
 
 @MainActor
 final class ChatViewModel: ObservableObject {
+  enum SessionScope: String {
+    case expanded
+    case compact
+    case voice
+  }
+
   enum ConnectionState {
     case idle
     case connecting
@@ -26,6 +32,13 @@ final class ChatViewModel: ObservableObject {
   private var completedAssistantResults: [String: NicoleMessage?] = [:]
   private weak var voiceController: NicoleVoiceController?
   private var voiceStreamingIDs: Set<String> = []
+  private var voiceReplySurfaces: [String: NicoleVoiceController.Surface] = [:]
+  private var lastCompactVisualContext: CompactVisualContextSnapshot?
+
+  private struct CompactVisualContextSnapshot {
+    let context: NicoleWorkspaceContextPayload
+    let createdAt: Date
+  }
 
   func attachVoiceController(_ controller: NicoleVoiceController) {
     voiceController = controller
@@ -59,7 +72,8 @@ final class ChatViewModel: ObservableObject {
   func send(
     baseURLString: String,
     settings _: AppSettings,
-    attachmentURL: URL? = nil
+    attachmentURL: URL? = nil,
+    sessionScope: SessionScope = .expanded
   ) async -> Bool {
     let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
     guard (!trimmed.isEmpty || attachmentURL != nil), !isSending else { return false }
@@ -96,7 +110,8 @@ final class ChatViewModel: ObservableObject {
     guard let assistantID = await beginStreamSend(
       message: trimmed,
       baseURLString: baseURLString,
-      clearInputOnSuccess: true
+      clearInputOnSuccess: true,
+      sessionScope: sessionScope
     ) else {
       isSending = false
       return false
@@ -131,7 +146,8 @@ final class ChatViewModel: ObservableObject {
         baseURLString: baseURLString,
         settings: settings,
         message: trimmed,
-        assistantID: assistantID
+        assistantID: assistantID,
+        sessionScope: .compact
       )
     }
 
@@ -141,7 +157,9 @@ final class ChatViewModel: ObservableObject {
   func sendVisionMessage(
     question: String,
     baseURLString: String,
-    settings: AppSettings
+    settings: AppSettings,
+    voiceSurface: NicoleVoiceController.Surface? = nil,
+    preparedTurn: NicoleVoicePreparedTurn? = nil
   ) async -> NicoleMessage? {
     guard !isSending else { return nil }
 
@@ -160,13 +178,19 @@ final class ChatViewModel: ObservableObject {
     let useStreamingTTS = voiceController?.isStreamingTTS == true
     if useStreamingTTS {
       voiceStreamingIDs.insert(assistantID)
+      if let voiceSurface {
+        voiceReplySurfaces[assistantID] = voiceSurface
+      }
     }
 
     await performVisionBackedStreamSend(
       baseURLString: baseURLString,
       settings: settings,
       message: question,
-      assistantID: assistantID
+      assistantID: assistantID,
+      sessionScope: .voice,
+      voiceSurface: voiceSurface,
+      preparedTurn: preparedTurn
     )
 
     return currentAssistantMessage(id: assistantID)
@@ -175,7 +199,10 @@ final class ChatViewModel: ObservableObject {
   func sendVoiceMessage(
     _ message: String,
     baseURLString: String,
-    settings _: AppSettings
+    settings _: AppSettings,
+    surface: NicoleVoiceController.Surface,
+    preparedTurn: NicoleVoicePreparedTurn? = nil,
+    context: NicoleWorkspaceContextPayload? = nil
   ) async -> NicoleMessage? {
     let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
@@ -185,6 +212,8 @@ final class ChatViewModel: ObservableObject {
     errorText = nil
     isSending = true
     connectionState = .syncing
+    backendOrigin = await apiClient.normalizedOriginString(baseURLString: baseURLString)
+    lastRequestURL = try? await apiClient.voiceURLString(baseURLString: baseURLString)
 
     let userMessage = NicoleMessage(role: .user, content: trimmed)
     messages.append(userMessage)
@@ -204,17 +233,25 @@ final class ChatViewModel: ObservableObject {
 
     if useStreamingTTS {
       voiceStreamingIDs.insert(assistantID)
+      voiceReplySurfaces[assistantID] = surface
     }
+    VoiceLatencyTracker.shared.markReplyRequestStarted(
+      on: surface,
+      voiceTurnId: preparedTurn?.voiceTurnId,
+      transcript: trimmed
+    )
 
     do {
-      // Voice now goes through /stream with voice=true for full tool capabilities
-      try await apiClient.streamReply(
+      try await apiClient.streamVoiceReplyEvents(
         baseURLString: baseURLString,
         message: trimmed,
-        context: nil,
-        voice: true
-      ) { [weak self] chunk in
-        await self?.appendAssistantChunk(chunk, assistantID: assistantID)
+        context: context,
+        sessionId: VoiceSessionManager.shared.sessionId(for: surface),
+        surface: VoiceSessionManager.shared.surfaceName(for: surface),
+        voiceTurnId: preparedTurn?.voiceTurnId,
+        interruptedVoiceTurnId: preparedTurn?.interruptedByTurnId
+      ) { [weak self] event in
+        await self?.handleAssistantStreamEvent(event, assistantID: assistantID)
       }
 
       finishAssistantMessage(id: assistantID)
@@ -230,6 +267,8 @@ final class ChatViewModel: ObservableObject {
     } catch {
       replaceAssistantPlaceholder(id: assistantID, content: "I'm unavailable right now.")
       voiceStreamingIDs.remove(assistantID)
+      voiceReplySurfaces.removeValue(forKey: assistantID)
+      VoiceSessionManager.shared.markReplyCompleted(on: surface)
       errorText = error.localizedDescription
       connectionState = .failed(error.localizedDescription)
       isSending = false
@@ -242,7 +281,8 @@ final class ChatViewModel: ObservableObject {
   private func beginStreamSend(
     message: String,
     baseURLString: String,
-    clearInputOnSuccess: Bool
+    clearInputOnSuccess: Bool,
+    sessionScope: SessionScope
   ) async -> String? {
     lastRequestURL = try? await apiClient.streamURLString(baseURLString: baseURLString)
     let assistantID = enqueueAssistantExchange(
@@ -256,7 +296,8 @@ final class ChatViewModel: ObservableObject {
         baseURLString: baseURLString,
         message: message,
         assistantID: assistantID,
-        context: nil
+        context: nil,
+        sessionScope: sessionScope
       )
     }
 
@@ -295,10 +336,32 @@ final class ChatViewModel: ObservableObject {
     baseURLString: String,
     settings: AppSettings,
     message: String,
-    assistantID: String
+    assistantID: String,
+    sessionScope: SessionScope,
+    voiceSurface: NicoleVoiceController.Surface? = nil,
+    preparedTurn: NicoleVoicePreparedTurn? = nil
   ) async {
-    let seedContext = await WorkspaceContextProvider.compactSeedContext()
-    let imageBase64 = await ScreenEnrichmentEngine.shared.captureScreenAsBase64()
+    if sessionScope == .compact,
+       let cachedContext = reusableCompactVisualContext(for: message)
+    {
+      await performStreamSend(
+        baseURLString: baseURLString,
+        message: message,
+        assistantID: assistantID,
+        context: cachedContext,
+        sessionScope: sessionScope
+      )
+      return
+    }
+
+    async let seedContextTask = WorkspaceContextProvider.compactSeedContext()
+    async let latestFrameTask = CompactScreenCaptureController.shared.latestFrameJPEGData(
+      timeoutNanoseconds: 250_000_000
+    )
+
+    let seedContext = await seedContextTask
+    let latestFrameData = await latestFrameTask
+    let imageBase64 = latestFrameData?.base64EncodedString()
 
     var context: NicoleWorkspaceContextPayload?
 
@@ -317,16 +380,44 @@ final class ChatViewModel: ObservableObject {
       }
     }
 
+    if context == nil,
+       let latestFrameData,
+       let visibleText = await ScreenEnrichmentEngine.shared.recognizeVisibleText(
+         in: latestFrameData
+       )
+    {
+      context = makeOCRFallbackContext(
+        seedContext: seedContext,
+        visibleText: visibleText
+      )
+    }
+
     if context == nil {
       context = await WorkspaceContextProvider.compactContext(settings: settings) ?? seedContext
     }
 
-    await performStreamSend(
-      baseURLString: baseURLString,
-      message: message,
-      assistantID: assistantID,
-      context: context
-    )
+    if sessionScope == .compact, let context {
+      cacheCompactVisualContextIfUseful(context)
+    }
+
+    if sessionScope == .voice, let voiceSurface {
+      await performVoiceStreamSend(
+        baseURLString: baseURLString,
+        message: message,
+        assistantID: assistantID,
+        context: context,
+        surface: voiceSurface,
+        preparedTurn: preparedTurn
+      )
+    } else {
+      await performStreamSend(
+        baseURLString: baseURLString,
+        message: message,
+        assistantID: assistantID,
+        context: context,
+        sessionScope: sessionScope
+      )
+    }
   }
 
   private func makeVisionBackedContext(
@@ -351,6 +442,116 @@ final class ChatViewModel: ObservableObject {
     )
   }
 
+  private func makeOCRFallbackContext(
+    seedContext: NicoleWorkspaceContextPayload?,
+    visibleText: String
+  ) -> NicoleWorkspaceContextPayload {
+    NicoleWorkspaceContextPayload(
+      surface: "macos",
+      activeApp: seedContext?.activeApp,
+      windowTitle: seedContext?.windowTitle,
+      selectedText: seedContext?.selectedText,
+      clipboardText: nil,
+      currentUrl: seedContext?.currentUrl,
+      currentFilePath: seedContext?.currentFilePath,
+      visibleContent: visibleText,
+      visualSummary: seedContext?.visualSummary,
+      visualElements: seedContext?.visualElements,
+      visualIssues: seedContext?.visualIssues,
+      visualConfidence: "low",
+      captureNotes: "Nicole fell back to OCR on the current compact capture because visual analysis was unavailable.",
+      note: "Compact vision fallback used OCR from the latest local capture. If the answer sounds cautious, the visual read may be incomplete."
+    )
+  }
+
+  private func reusableCompactVisualContext(
+    for message: String
+  ) -> NicoleWorkspaceContextPayload? {
+    guard let snapshot = lastCompactVisualContext else {
+      return nil
+    }
+
+    guard Date().timeIntervalSince(snapshot.createdAt) <= 15 else {
+      lastCompactVisualContext = nil
+      return nil
+    }
+
+    let normalized = message
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+
+    guard looksLikeCompactVisualFollowUp(normalized) else {
+      return nil
+    }
+
+    return NicoleWorkspaceContextPayload(
+      surface: snapshot.context.surface,
+      activeApp: snapshot.context.activeApp,
+      windowTitle: snapshot.context.windowTitle,
+      selectedText: snapshot.context.selectedText,
+      clipboardText: snapshot.context.clipboardText,
+      currentUrl: snapshot.context.currentUrl,
+      currentFilePath: snapshot.context.currentFilePath,
+      visibleContent: snapshot.context.visibleContent,
+      visualSummary: snapshot.context.visualSummary,
+      visualElements: snapshot.context.visualElements,
+      visualIssues: snapshot.context.visualIssues,
+      visualConfidence: snapshot.context.visualConfidence,
+      captureNotes: snapshot.context.captureNotes,
+      note: "Reusing the latest compact visual context from a moment ago. Stay anchored to the same on-screen topic unless Roy clearly changed subjects."
+    )
+  }
+
+  private func cacheCompactVisualContextIfUseful(
+    _ context: NicoleWorkspaceContextPayload
+  ) {
+    guard
+      context.visualSummary != nil ||
+      context.visibleContent != nil ||
+      context.currentFilePath != nil ||
+      context.windowTitle != nil
+    else {
+      return
+    }
+
+    lastCompactVisualContext = CompactVisualContextSnapshot(
+      context: context,
+      createdAt: Date()
+    )
+  }
+
+  private func looksLikeCompactVisualFollowUp(_ normalized: String) -> Bool {
+    guard !normalized.isEmpty else {
+      return false
+    }
+
+    let refreshPatterns = [
+      #"^what do you see"#,
+      #"^look at"#,
+      #"^check (?:the|my) screen"#,
+      #"^read (?:the|this) screen"#,
+      #"^scan (?:the|this)"#,
+      #"^summarize (?:the|this) page"#,
+      #"^what'?s on (?:the|my) screen"#,
+    ]
+
+    if refreshPatterns.contains(where: { normalized.range(of: $0, options: .regularExpression) != nil }) {
+      return false
+    }
+
+    let followUpPatterns = [
+      #"^(?:yes|yeah|yep|continue|go on|keep going)[.!?]*$"#,
+      #"^(?:explain|clarify|simplify|summarize|break down|teach|walk me through)\b"#,
+      #"^(?:what does that mean|why|how|so|then)\b"#,
+      #"^(?:quiz me|test me|help me understand|make it simpler)\b"#,
+      #"^(?:explain|solve|answer) (?:this|that|it)\b"#,
+    ]
+
+    return followUpPatterns.contains {
+      normalized.range(of: $0, options: .regularExpression) != nil
+    }
+  }
+
   private func currentAssistantMessage(id: String) -> NicoleMessage? {
     guard let index = messages.firstIndex(where: { $0.id == id }) else {
       return nil
@@ -363,15 +564,17 @@ final class ChatViewModel: ObservableObject {
     baseURLString: String,
     message: String,
     assistantID: String,
-    context: NicoleWorkspaceContextPayload?
+    context: NicoleWorkspaceContextPayload?,
+    sessionScope: SessionScope
   ) async {
     do {
-      try await apiClient.streamReply(
+      try await apiClient.streamReplyEvents(
         baseURLString: baseURLString,
         message: message,
-        context: context
-      ) { [weak self] chunk in
-        await self?.appendAssistantChunk(chunk, assistantID: assistantID)
+        context: context,
+        sessionId: sessionScope.rawValue
+      ) { [weak self] event in
+        await self?.handleAssistantStreamEvent(event, assistantID: assistantID)
       }
 
       finishAssistantMessage(id: assistantID)
@@ -396,7 +599,104 @@ final class ChatViewModel: ObservableObject {
     }
   }
 
-  private func appendAssistantChunk(_ chunk: String, assistantID: String) {
+  private func performVoiceStreamSend(
+    baseURLString: String,
+    message: String,
+    assistantID: String,
+    context: NicoleWorkspaceContextPayload?,
+    surface: NicoleVoiceController.Surface,
+    preparedTurn: NicoleVoicePreparedTurn?
+  ) async {
+    VoiceLatencyTracker.shared.markReplyRequestStarted(
+      on: surface,
+      voiceTurnId: preparedTurn?.voiceTurnId,
+      transcript: message
+    )
+
+    do {
+      try await apiClient.streamVoiceReplyEvents(
+        baseURLString: baseURLString,
+        message: message,
+        context: context,
+        sessionId: VoiceSessionManager.shared.sessionId(for: surface),
+        surface: VoiceSessionManager.shared.surfaceName(for: surface),
+        voiceTurnId: preparedTurn?.voiceTurnId,
+        interruptedVoiceTurnId: preparedTurn?.interruptedByTurnId
+      ) { [weak self] event in
+        await self?.handleAssistantStreamEvent(event, assistantID: assistantID)
+      }
+
+      finishAssistantMessage(id: assistantID)
+      connectionState = .connected(
+        messageCount: messages.filter { $0.role != .system }.count
+      )
+      isSending = false
+    } catch {
+      replaceAssistantPlaceholder(
+        id: assistantID,
+        content: "I'm unavailable right now."
+      )
+      voiceStreamingIDs.remove(assistantID)
+      voiceReplySurfaces.removeValue(forKey: assistantID)
+      VoiceSessionManager.shared.markReplyCompleted(on: surface)
+      errorText = error.localizedDescription
+      connectionState = .failed(error.localizedDescription)
+      isSending = false
+    }
+  }
+
+  private func handleAssistantStreamEvent(
+    _ event: NicoleStreamEventEnvelope,
+    assistantID: String
+  ) {
+    guard let index = messages.firstIndex(where: { $0.id == assistantID }) else {
+      return
+    }
+
+    if let surface = voiceReplySurfaces[assistantID] {
+      VoiceLatencyTracker.shared.recordStreamEvent(event, on: surface)
+    }
+
+    switch event.type {
+    case .preface:
+      messages[index].preActionText = event.text
+    case .status:
+      if messages[index].preActionText?.isEmpty != false &&
+        messages[index].content.isEmpty &&
+        messages[index].activityItems.isEmpty
+      {
+        messages[index].preActionText = event.text
+      } else {
+        messages[index].liveStatusText = event.text
+      }
+    case .tool, .activity:
+      let trimmed = event.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { return }
+      if messages[index].activityItems.last?.text != trimmed {
+        messages[index].activityItems.append(NicoleActivityItem(text: trimmed))
+      }
+    case .textDelta:
+      appendAssistantChunk(event.text, assistantID: assistantID, feedStreamingTTS: true)
+    case .text:
+      appendAssistantChunk(event.text, assistantID: assistantID, feedStreamingTTS: false)
+    case .speechBoundary:
+      if voiceStreamingIDs.contains(assistantID) {
+        voiceController?.handleSpeechBoundary(event.text)
+      }
+    case .latency:
+      break
+    case .done:
+      break
+    case .error:
+      messages[index].liveStatusText = nil
+    }
+  }
+
+  private func appendAssistantChunk(
+    _ chunk: String,
+    assistantID: String,
+    feedStreamingTTS: Bool
+  ) {
     guard let index = messages.firstIndex(where: { $0.id == assistantID }) else {
       return
     }
@@ -411,24 +711,16 @@ final class ChatViewModel: ObservableObject {
     }
 
     let parsed = parseAssistantBuffer(rawContent)
-
-    if parsed.isThoughtOpen || parsed.thoughtContent != nil {
-      message.isThoughtOpen = parsed.isThoughtOpen
-      message.thoughtContent = parsed.thoughtContent
-
-      if let start = thoughtStartTimes[assistantID] {
-        message.thoughtDuration = Int(Date().timeIntervalSince(start))
-      }
-    } else {
-      message.isThoughtOpen = false
-      message.thoughtContent = nil
-    }
-
+    message.isThoughtOpen = false
+    message.thoughtContent = nil
     message.content = parsed.visibleContent
     messages[index] = message
 
     // Feed streaming content to voice controller for sentence-by-sentence TTS
-    if voiceStreamingIDs.contains(assistantID), !parsed.visibleContent.isEmpty {
+    if feedStreamingTTS,
+      voiceStreamingIDs.contains(assistantID),
+      !parsed.visibleContent.isEmpty
+    {
       voiceController?.handleStreamingContent(parsed.visibleContent)
     }
   }
@@ -436,21 +728,24 @@ final class ChatViewModel: ObservableObject {
   private func finishAssistantMessage(id: String) {
     guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
     messages[index].isStreaming = false
+    messages[index].liveStatusText = nil
 
     let finalRaw = rawAssistantBuffers[id] ?? messages[index].content
     let parsed = parseAssistantBuffer(finalRaw)
     messages[index].content = parsed.visibleContent
-    messages[index].thoughtContent = parsed.thoughtContent
+    messages[index].thoughtContent = nil
+    messages[index].isThoughtOpen = false
 
-    if messages[index].thoughtContent != nil {
-      messages[index].isThoughtOpen = false
-    }
+    let usedStreamingTTS = voiceStreamingIDs.remove(id) != nil
 
-    if voiceStreamingIDs.remove(id) != nil {
+    if usedStreamingTTS {
       // Streaming TTS — send any remaining text and signal completion
       voiceController?.finishStreamingTTS(remainingContent: messages[index].content)
     } else if !messages[index].content.isEmpty {
       voiceController?.handleCompletedAssistantMessage(messages[index])
+    }
+    if let surface = voiceReplySurfaces.removeValue(forKey: id), !usedStreamingTTS {
+      VoiceSessionManager.shared.markReplyCompleted(on: surface)
     }
 
     if let continuation = completionContinuations.removeValue(forKey: id) {
@@ -469,6 +764,7 @@ final class ChatViewModel: ObservableObject {
     messages[index].thoughtContent = nil
     messages[index].isThoughtOpen = false
     messages[index].isStreaming = false
+    messages[index].liveStatusText = nil
     rawAssistantBuffers.removeValue(forKey: id)
     thoughtStartTimes.removeValue(forKey: id)
   }
