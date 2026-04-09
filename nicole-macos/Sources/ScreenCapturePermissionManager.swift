@@ -1,26 +1,82 @@
+import AppKit
+import CoreGraphics
 import Foundation
 @preconcurrency import ScreenCaptureKit
 
+enum NicolePermissionState: Equatable {
+  case authorized
+  case notDetermined
+  case denied
+  case restricted
+  case unavailable(String)
+}
+
 @MainActor
 enum ScreenCapturePermissionManager {
-  /// Check if screen capture actually works by trying to get shareable content.
-  /// This is more reliable than CGPreflightScreenCaptureAccess() for self-signed apps.
-  static func checkPermission() async -> Bool {
+  private static let requestAttemptKey = "nicole.screenCapturePermissionRequested"
+
+  static func currentState() async -> NicolePermissionState {
+    if CGPreflightScreenCaptureAccess() {
+      return .authorized
+    }
+
     do {
-      _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-      return true
+      _ = try await SCShareableContent.excludingDesktopWindows(
+        false,
+        onScreenWindowsOnly: true
+      )
+      return .authorized
+    } catch let error as NSError {
+      if error.domain == SCStreamErrorDomain {
+        if hasRequestedPermissionBefore {
+          return .denied
+        }
+        return .notDetermined
+      }
+
+      if hasRequestedPermissionBefore {
+        return .denied
+      }
+
+      return .unavailable(error.localizedDescription)
     } catch {
-      return false
+      if hasRequestedPermissionBefore {
+        return .denied
+      }
+
+      return .unavailable(error.localizedDescription)
     }
   }
 
-  /// Request screen capture permission on launch if not already granted.
-  static func requestOnLaunch() {
-    Task.detached(priority: .userInitiated) {
-      let hasAccess = await checkPermission()
-      if !hasAccess {
-        _ = CGRequestScreenCaptureAccess()
-      }
+  static func requestAccessIfNeeded() async -> NicolePermissionState {
+    let state = await currentState()
+
+    switch state {
+    case .authorized, .denied, .restricted:
+      return state
+    case .unavailable:
+      return state
+    case .notDetermined:
+      UserDefaults.standard.set(true, forKey: requestAttemptKey)
+      _ = CGRequestScreenCaptureAccess()
+      try? await Task.sleep(nanoseconds: 350_000_000)
+      return await currentState()
     }
+  }
+
+  static func openSystemSettings() {
+    guard
+      let url = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+      )
+    else {
+      return
+    }
+
+    NSWorkspace.shared.open(url)
+  }
+
+  private static var hasRequestedPermissionBefore: Bool {
+    UserDefaults.standard.bool(forKey: requestAttemptKey)
   }
 }

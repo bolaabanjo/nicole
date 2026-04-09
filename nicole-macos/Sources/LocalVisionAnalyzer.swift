@@ -7,6 +7,7 @@ actor LocalVisionAnalyzer {
   private let baseURL: URL?
   private let keepAlive: String
   private var cachedModelName: String?
+  private var lastWarmAt: Date?
 
   private init(session: URLSession = .shared) {
     self.session = session
@@ -55,6 +56,23 @@ actor LocalVisionAnalyzer {
       return decodeVisionAnalysis(from: content)
     } catch {
       return nil
+    }
+  }
+
+  func warmIfNeeded() async {
+    guard let baseURL else { return }
+
+    if let lastWarmAt, Date().timeIntervalSince(lastWarmAt) < 120 {
+      return
+    }
+
+    do {
+      let modelName = try await resolveVisionModel(baseURL: baseURL)
+      let request = try makeWarmRequest(baseURL: baseURL, modelName: modelName)
+      _ = try await session.data(for: request)
+      lastWarmAt = Date()
+    } catch {
+      return
     }
   }
 
@@ -154,6 +172,38 @@ actor LocalVisionAnalyzer {
     var request = URLRequest(url: baseURL.appending(path: "api/chat"))
     request.httpMethod = "POST"
     request.timeoutInterval = 90
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    return request
+  }
+
+  private func makeWarmRequest(
+    baseURL: URL,
+    modelName: String
+  ) throws -> URLRequest {
+    let body: [String: Any] = [
+      "model": modelName,
+      "messages": [
+        [
+          "role": "system",
+          "content": "Reply with OK.",
+        ],
+        [
+          "role": "user",
+          "content": "Warm up for Nicole compact vision.",
+        ],
+      ],
+      "stream": false,
+      "think": false,
+      "keep_alive": keepAlive,
+      "options": [
+        "num_predict": 4,
+      ],
+    ]
+
+    var request = URLRequest(url: baseURL.appending(path: "api/chat"))
+    request.httpMethod = "POST"
+    request.timeoutInterval = 20
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
     return request

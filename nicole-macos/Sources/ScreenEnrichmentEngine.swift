@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ImageIO
 @preconcurrency import ScreenCaptureKit
 import Vision
 
@@ -75,6 +76,21 @@ actor ScreenEnrichmentEngine {
         failureReason: "Local OCR failed, so Nicole is using metadata only.",
         for: fastSnapshot.target
       )
+    }
+  }
+
+  func recognizeVisibleText(in imageData: Data) async -> String? {
+    guard
+      let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
+      let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+    else {
+      return nil
+    }
+
+    do {
+      return try await recognizeVisibleText(in: image)
+    } catch {
+      return nil
     }
   }
 
